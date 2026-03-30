@@ -220,6 +220,7 @@ Map asset behavior:
 - heightmaps are served as `512x512` greyscale BMP images
 - map features return JSON with `metal_spots` and placed `features`
 - `.sdz` and `.sd7` map archives are supported
+- `.sd7` extraction uses `ZKSCRAPER_7Z_PATH` when set; otherwise Windows defaults to `C:\Program Files\7-Zip\7z.exe`
 
 ## Stored Replay Structure
 

@@ -1,8 +1,10 @@
 use std::{
+    env,
     fmt,
     fs,
     io::{Cursor, Read},
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use fastapi::ToSchema;
@@ -160,13 +162,14 @@ impl MapService {
                 Ok(names)
             }
             ArchiveKind::SevenZip(path) => {
-                let archive =
-                    Archive::open(path).map_err(|err| MapAssetError::new(err.to_string()))?;
-                Ok(archive
-                    .files
-                    .iter()
-                    .map(|entry| normalize_archive_path(entry.name()))
-                    .collect())
+                match Archive::open(path) {
+                    Ok(archive) => Ok(archive
+                        .files
+                        .iter()
+                        .map(|entry| normalize_archive_path(entry.name()))
+                        .collect()),
+                    Err(_) => list_archive_entries_with_7z(path),
+                }
             }
         }
     }
@@ -178,18 +181,43 @@ impl MapService {
         extension: &str,
     ) -> Result<String, MapAssetError> {
         let requested = normalize_map_key(map_name);
-        self.list_archive_entries(archive)?
-            .into_iter()
-            .find(|path| {
+        let entries = self.list_archive_entries(archive)?;
+        if let Some(path) = entries.iter().find(|path| {
+            archive_map_stem(path)
+                .map(|stem| normalize_map_key(&stem) == requested && path.ends_with(extension))
+                .unwrap_or(false)
+        }) {
+            return Ok(path.clone());
+        }
+
+        let candidates = entries
+            .iter()
+            .filter(|path| path.ends_with(extension))
+            .filter(|path| {
                 archive_map_stem(path)
-                    .map(|stem| normalize_map_key(&stem) == requested && path.ends_with(extension))
+                    .map(|stem| {
+                        let folded = normalize_map_key(&stem);
+                        folded.starts_with(&requested) || requested.starts_with(&folded)
+                    })
                     .unwrap_or(false)
             })
-            .ok_or_else(|| {
-                MapAssetError::new(format!(
-                    "could not find {extension} for map '{map_name}' in archive"
-                ))
-            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if candidates.len() == 1 {
+            return Ok(candidates[0].clone());
+        }
+
+        let all_map_files = entries
+            .into_iter()
+            .filter(|path| path.ends_with(extension))
+            .collect::<Vec<_>>();
+        if all_map_files.len() == 1 {
+            return Ok(all_map_files[0].clone());
+        }
+
+        Err(MapAssetError::new(format!(
+            "could not find {extension} for map '{map_name}' in archive"
+        )))
     }
 
     fn read_optional_archive_file(
@@ -234,30 +262,14 @@ impl MapService {
                 }
             }
             ArchiveKind::SevenZip(path) => {
-                let mut source =
-                    fs::File::open(path).map_err(|err| MapAssetError::new(err.to_string()))?;
-                let reader_len = source
-                    .metadata()
-                    .map_err(|err| MapAssetError::new(err.to_string()))?
-                    .len();
-                let mut reader = SevenZReader::new(&mut source, reader_len, Password::empty())
-                    .map_err(|err| MapAssetError::new(err.to_string()))?;
-                let mut found: Option<Vec<u8>> = None;
-                reader
-                    .for_each_entries(|entry, contents| {
-                        if normalize_archive_path(entry.name()) == requested {
-                            let mut bytes = Vec::new();
-                            contents
-                                .read_to_end(&mut bytes)
-                                .map_err(sevenz_rust::Error::io)?;
-                            found = Some(bytes);
-                            return Ok(false);
+                match read_sevenz_file(path, &requested) {
+                    Ok(bytes) => return Ok(bytes),
+                    Err(primary_err) => {
+                        if let Ok(bytes) = read_sevenz_file_with_7z(path, &requested) {
+                            return Ok(bytes);
                         }
-                        Ok(true)
-                    })
-                    .map_err(|err| MapAssetError::new(err.to_string()))?;
-                if let Some(bytes) = found {
-                    return Ok(bytes);
+                        return Err(primary_err);
+                    }
                 }
             }
         }
@@ -311,12 +323,10 @@ fn parse_smf_heightmap(bytes: &[u8]) -> Result<(u32, u32, Vec<u16>), MapAssetErr
     let map_y = read_u32_le(bytes, 28)?;
     let heightmap_ptr = read_u32_le(bytes, 52)? as usize;
     let width = map_x
-        .checked_mul(64)
-        .and_then(|value| value.checked_add(1))
+        .checked_add(1)
         .ok_or_else(|| MapAssetError::new("smf width overflow"))?;
     let height = map_y
-        .checked_mul(64)
-        .and_then(|value| value.checked_add(1))
+        .checked_add(1)
         .ok_or_else(|| MapAssetError::new("smf height overflow"))?;
     let sample_count = width as usize * height as usize;
     let byte_len = sample_count
@@ -460,6 +470,81 @@ fn read_u32_le(bytes: &[u8], offset: usize) -> Result<u32, MapAssetError> {
     Ok(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
 }
 
+fn read_sevenz_file(path: &Path, requested: &str) -> Result<Vec<u8>, MapAssetError> {
+    let mut source = fs::File::open(path).map_err(|err| MapAssetError::new(err.to_string()))?;
+    let reader_len = source
+        .metadata()
+        .map_err(|err| MapAssetError::new(err.to_string()))?
+        .len();
+    let mut reader = SevenZReader::new(&mut source, reader_len, Password::empty())
+        .map_err(|err| MapAssetError::new(err.to_string()))?;
+    let mut found: Option<Vec<u8>> = None;
+    reader
+        .for_each_entries(|entry, contents| {
+            if normalize_archive_path(entry.name()) == requested {
+                let mut bytes = Vec::new();
+                contents
+                    .read_to_end(&mut bytes)
+                    .map_err(sevenz_rust::Error::io)?;
+                found = Some(bytes);
+                return Ok(false);
+            }
+            Ok(true)
+        })
+        .map_err(|err| MapAssetError::new(err.to_string()))?;
+    found.ok_or_else(|| MapAssetError::new(format!("archive file not found: {requested}")))
+}
+
+fn list_archive_entries_with_7z(path: &Path) -> Result<Vec<String>, MapAssetError> {
+    let output = Command::new(resolve_7z_path())
+        .arg("l")
+        .arg("-slt")
+        .arg(path)
+        .output()
+        .map_err(|err| MapAssetError::new(err.to_string()))?;
+    if !output.status.success() {
+        return Err(MapAssetError::new(format!(
+            "7z list failed for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix("Path = "))
+        .map(normalize_archive_path)
+        .filter(|entry| !entry.is_empty() && !entry.ends_with('/'))
+        .collect())
+}
+
+fn read_sevenz_file_with_7z(path: &Path, requested: &str) -> Result<Vec<u8>, MapAssetError> {
+    let output = Command::new(resolve_7z_path())
+        .arg("x")
+        .arg(path)
+        .arg(requested)
+        .arg("-so")
+        .output()
+        .map_err(|err| MapAssetError::new(err.to_string()))?;
+    if !output.status.success() {
+        return Err(MapAssetError::new(format!(
+            "7z extract failed for {}:{}: {}",
+            path.display(),
+            requested,
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(output.stdout)
+}
+
+fn resolve_7z_path() -> &'static str {
+    Box::leak(
+        env::var("ZKSCRAPER_7Z_PATH")
+            .unwrap_or_else(|_| "C:\\Program Files\\7-Zip\\7z.exe".to_string())
+            .into_boxed_str(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, io::Write, path::Path};
@@ -542,6 +627,26 @@ mod tests {
         );
         assert_eq!(features.features.len(), 2);
         assert_eq!(features.features[0].name, "treetype1");
+        Ok(())
+    }
+
+    #[test]
+    fn matches_display_name_to_underscored_map_file(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let temp_dir = tempfile::tempdir()?;
+        let maps_dir = temp_dir.path().join("maps");
+        fs::create_dir_all(&maps_dir)?;
+        let archive_path = maps_dir.join("duke_nukem_4.2.sdz");
+        let file = fs::File::create(&archive_path)?;
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        writer.start_file("maps/duke_nukem_4.2.smf", options)?;
+        writer.write_all(&sample_smf())?;
+        writer.finish()?;
+
+        let service = MapService::from_zk_path(temp_dir.path())?;
+        let bmp = service.heightmap_bmp("duke nukem 4.2")?;
+        assert!(bmp.starts_with(b"BM"));
         Ok(())
     }
 }

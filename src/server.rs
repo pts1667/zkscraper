@@ -241,9 +241,9 @@ async fn list_replays(
 async fn get_replay(
     State(state): State<AppState>,
     Path(battle_id): Path<u64>,
-) -> Result<Json<ParsedReplay>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let db = state.db.clone();
-    let replay = tokio::task::spawn_blocking(move || db.get_replay(battle_id))
+    let replay = tokio::task::spawn_blocking(move || db.get_replay_value_lossy(battle_id))
         .await
         .map_err(|err| ApiError::internal(format!("replay read task failed: {err}")))?
         .map_err(|err| ApiError::internal(format!("failed to read replay {battle_id}: {err}")))?;
