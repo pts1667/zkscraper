@@ -3,12 +3,15 @@ use std::{
     fmt,
     fs,
     io::{Cursor, Read},
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     process::Command,
+    sync::{Arc, Mutex},
 };
 
 use fastapi::ToSchema;
 use image::{imageops::FilterType, DynamicImage, GrayImage, ImageFormat, Luma};
+use lru::LruCache;
 use serde::{Deserialize, Serialize};
 use sevenz_rust::{Archive, Password, SevenZReader};
 use zip::ZipArchive;
@@ -33,7 +36,12 @@ impl std::error::Error for MapAssetError {}
 #[derive(Debug, Clone)]
 pub struct MapService {
     maps_dir: PathBuf,
+    heightmap_cache: Arc<Mutex<LruCache<String, Arc<Vec<u8>>>>>,
+    features_cache: Arc<Mutex<LruCache<String, Arc<MapFeaturesResponse>>>>,
 }
+
+const MAP_HEIGHTMAP_CACHE_SIZE: usize = 64;
+const MAP_FEATURES_CACHE_SIZE: usize = 64;
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Serialize, ToSchema)]
 pub struct MetalSpot {
@@ -75,10 +83,29 @@ impl MapService {
             )));
         }
 
-        Ok(Self { maps_dir })
+        Ok(Self {
+            maps_dir,
+            heightmap_cache: Arc::new(Mutex::new(LruCache::new(
+                NonZeroUsize::new(MAP_HEIGHTMAP_CACHE_SIZE).expect("cache size must be non-zero"),
+            ))),
+            features_cache: Arc::new(Mutex::new(LruCache::new(
+                NonZeroUsize::new(MAP_FEATURES_CACHE_SIZE).expect("cache size must be non-zero"),
+            ))),
+        })
     }
 
     pub fn heightmap_bmp(&self, map_name: &str) -> Result<Vec<u8>, MapAssetError> {
+        let cache_key = normalize_map_key(map_name);
+        if let Some(cached) = self
+            .heightmap_cache
+            .lock()
+            .map_err(|_| MapAssetError::new("heightmap cache mutex poisoned"))?
+            .get(&cache_key)
+            .cloned()
+        {
+            return Ok((*cached).clone());
+        }
+
         let archive = self.resolve_archive(map_name)?;
         let smf_path = self.find_map_file_path(&archive, map_name, ".smf")?;
         let smf_bytes = self.read_archive_file(&archive, &smf_path)?;
@@ -89,10 +116,26 @@ impl MapService {
         DynamicImage::ImageLuma8(image)
             .write_to(&mut out, ImageFormat::Bmp)
             .map_err(|err| MapAssetError::new(err.to_string()))?;
-        Ok(out.into_inner())
+        let bytes = out.into_inner();
+        self.heightmap_cache
+            .lock()
+            .map_err(|_| MapAssetError::new("heightmap cache mutex poisoned"))?
+            .put(cache_key, Arc::new(bytes.clone()));
+        Ok(bytes)
     }
 
     pub fn map_features(&self, map_name: &str) -> Result<MapFeaturesResponse, MapAssetError> {
+        let cache_key = normalize_map_key(map_name);
+        if let Some(cached) = self
+            .features_cache
+            .lock()
+            .map_err(|_| MapAssetError::new("map features cache mutex poisoned"))?
+            .get(&cache_key)
+            .cloned()
+        {
+            return Ok((*cached).clone());
+        }
+
         let archive = self.resolve_archive(map_name)?;
         let metal_spots = self
             .read_optional_archive_file(&archive, "mapconfig/map_metal_layout.lua")?
@@ -103,15 +146,22 @@ impl MapService {
             .map(|bytes| parse_feature_placements(&String::from_utf8_lossy(&bytes)))
             .unwrap_or_default();
 
-        Ok(MapFeaturesResponse {
+        let response = MapFeaturesResponse {
             map_name: map_name.to_string(),
             metal_spots,
             features,
-        })
+        };
+        self.features_cache
+            .lock()
+            .map_err(|_| MapAssetError::new("map features cache mutex poisoned"))?
+            .put(cache_key, Arc::new(response.clone()));
+        Ok(response)
     }
 
     fn resolve_archive(&self, map_name: &str) -> Result<ArchiveKind, MapAssetError> {
         let requested = normalize_map_key(map_name);
+        let mut exact_matches = Vec::new();
+        let mut prefix_matches = Vec::new();
         let mut fallbacks = Vec::new();
 
         for entry in fs::read_dir(&self.maps_dir).map_err(|err| MapAssetError::new(err.to_string()))? {
@@ -123,12 +173,22 @@ impl MapService {
             let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
                 continue;
             };
-            if normalize_map_key(stem) == requested {
-                return archive_kind(path);
+            let folded_stem = normalize_map_key(stem);
+            if folded_stem == requested {
+                exact_matches.push(path.clone());
+            } else if folded_stem.starts_with(&requested) || requested.starts_with(&folded_stem) {
+                prefix_matches.push(path.clone());
             }
             if extension.eq_ignore_ascii_case("sd7") || extension.eq_ignore_ascii_case("sdz") {
                 fallbacks.push(path);
             }
+        }
+
+        if exact_matches.len() == 1 {
+            return archive_kind(exact_matches.remove(0));
+        }
+        if prefix_matches.len() == 1 {
+            return archive_kind(prefix_matches.remove(0));
         }
 
         for path in fallbacks {

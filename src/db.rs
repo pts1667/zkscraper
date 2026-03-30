@@ -1,10 +1,13 @@
 use std::{
     fmt,
+    num::NonZeroUsize,
     path::Path,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use fastapi::ToSchema;
+use lru::LruCache;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::parse::ParsedReplay;
@@ -31,7 +34,10 @@ pub struct ReplayDb {
     db: sled::Db,
     battle_ids: Arc<Vec<u64>>,
     summaries: Arc<Vec<ReplaySummary>>,
+    replay_json_cache: Option<Arc<Mutex<LruCache<u64, Arc<serde_json::Value>>>>>,
 }
+
+const DEFAULT_REPLAY_JSON_CACHE_SIZE: usize = 0;
 
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct ReplaySummary {
@@ -63,17 +69,24 @@ pub struct ReplayListResponse {
 impl ReplayDb {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ReplayDbError> {
         let db = sled::open(path).map_err(|err| ReplayDbError::new(err.to_string()))?;
-        let mut indexed = Vec::with_capacity(db.len());
+        let mut entries = Vec::with_capacity(db.len());
         for entry in db.iter() {
             let (key, value) = entry.map_err(|err| ReplayDbError::new(err.to_string()))?;
+            entries.push((key.to_vec(), value.to_vec()));
+        }
+
+        let mut indexed = entries
+            .into_par_iter()
+            .map(|(key, value)| {
             let key = std::str::from_utf8(key.as_ref())
                 .map_err(|err| ReplayDbError::new(err.to_string()))?;
             let battle_id = key.parse::<u64>().map_err(|err| {
                 ReplayDbError::new(format!("invalid battle id key '{key}': {err}"))
             })?;
             let summary = decode_replay_summary(value.as_ref())?;
-            indexed.push((battle_id, summary));
-        }
+                Ok((battle_id, summary))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         indexed.sort_unstable_by_key(|(battle_id, _)| *battle_id);
         let battle_ids = indexed.iter().map(|(battle_id, _)| *battle_id).collect();
         let summaries = indexed.into_iter().map(|(_, summary)| summary).collect();
@@ -82,6 +95,7 @@ impl ReplayDb {
             db,
             battle_ids: Arc::new(battle_ids),
             summaries: Arc::new(summaries),
+            replay_json_cache: replay_json_cache(),
         })
     }
 
@@ -110,6 +124,17 @@ impl ReplayDb {
         &self,
         battle_id: u64,
     ) -> Result<Option<serde_json::Value>, ReplayDbError> {
+        if let Some(cache) = self.replay_json_cache.as_ref() {
+            if let Some(cached) = cache
+                .lock()
+                .map_err(|_| ReplayDbError::new("replay cache mutex poisoned"))?
+                .get(&battle_id)
+                .cloned()
+            {
+                return Ok(Some((*cached).clone()));
+            }
+        }
+
         let key = battle_id.to_string();
         let Some(value) = self
             .db
@@ -119,7 +144,14 @@ impl ReplayDb {
             return Ok(None);
         };
 
-        decode_replay_value(value.as_ref()).map(Some)
+        let parsed = decode_replay_value(value.as_ref())?;
+        if let Some(cache) = self.replay_json_cache.as_ref() {
+            cache
+                .lock()
+                .map_err(|_| ReplayDbError::new("replay cache mutex poisoned"))?
+                .put(battle_id, Arc::new(parsed.clone()));
+        }
+        Ok(Some(parsed))
     }
 
     pub fn get_replay_value_lossy(
@@ -247,6 +279,14 @@ fn decode_replay_value(value: &[u8]) -> Result<serde_json::Value, ReplayDbError>
 fn decode_replay_summary(value: &[u8]) -> Result<ReplaySummary, ReplayDbError> {
     let parsed = decode_replay_value(value)?;
     Ok(ReplaySummary::from_value(&parsed))
+}
+
+fn replay_json_cache() -> Option<Arc<Mutex<LruCache<u64, Arc<serde_json::Value>>>>> {
+    let size = std::env::var("ZKSCRAPER_REPLAY_JSON_CACHE_SIZE")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_REPLAY_JSON_CACHE_SIZE);
+    NonZeroUsize::new(size).map(|size| Arc::new(Mutex::new(LruCache::new(size))))
 }
 
 fn sanitize_replay_value(value: &mut serde_json::Value) {

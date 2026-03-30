@@ -221,6 +221,7 @@ Map asset behavior:
 - map features return JSON with `metal_spots` and placed `features`
 - `.sdz` and `.sd7` map archives are supported
 - `.sd7` extraction uses `ZKSCRAPER_7Z_PATH` when set; otherwise Windows defaults to `C:\Program Files\7-Zip\7z.exe`
+- replay JSON caching is disabled by default; set `ZKSCRAPER_REPLAY_JSON_CACHE_SIZE` to a small positive integer to enable an LRU cache by replay count
 
 ## Stored Replay Structure
 
