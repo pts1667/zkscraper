@@ -40,6 +40,7 @@ This repo has multiple binaries:
 
 - `zkscraper`: gather/download/parse pipeline
 - `reader`: inspect parsed replay records
+- `serve-db`: serve parsed replay records over HTTP with OpenAPI docs
 
 ## Full Pipeline
 
@@ -178,6 +179,32 @@ Show a compact summary:
 ```powershell
 cargo run --release --bin reader -- --db .\target\parsed-db show --battle-id 2392822
 ```
+
+## Serve Parsed Data Over HTTP
+
+Run a local read-only API server over the parsed replay DB:
+
+```powershell
+cargo run --release --bin serve-db -- --db .\target\parsed-db
+```
+
+Defaults:
+
+- binds to `127.0.0.1:3000`
+- OpenAPI JSON at `http://127.0.0.1:3000/openapi.json`
+- Swagger UI at `http://127.0.0.1:3000/docs`
+
+Optional bind override:
+
+```powershell
+cargo run --release --bin serve-db -- --db .\target\parsed-db --host 0.0.0.0 --port 8080
+```
+
+Available endpoints:
+
+- `GET /healthz`
+- `GET /replays?offset=0&limit=100`
+- `GET /replays/{battle_id}`
 
 ## Stored Replay Structure
 

@@ -2,11 +2,7 @@ use clap::{Parser, Subcommand};
 use std::error::Error;
 use std::path::PathBuf;
 use url::Url;
-
-mod fetch;
-mod gather;
-mod maps;
-mod parse;
+use zkscraper::{fetch, gather, maps, parse};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]

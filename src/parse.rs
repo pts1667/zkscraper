@@ -6,6 +6,7 @@ use std::{
     process::Stdio,
 };
 
+use fastapi::ToSchema;
 use flate2::read::GzDecoder;
 use indicatif::ProgressBar;
 use regex::Regex;
@@ -56,47 +57,47 @@ struct ScriptMetadata {
     teams: Vec<TeamMetadata>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct ParsedReplay {
-    battle_id: u64,
-    replay_filename: String,
-    game_version: String,
-    engine_version: String,
-    map_name: Option<String>,
-    game_name: Option<String>,
-    zksearchtag: Option<String>,
-    players: Vec<PlayerMetadata>,
-    teams: Vec<TeamMetadata>,
-    map_size: Option<MapSize>,
-    global_snapshots: Vec<SnapshotRecord>,
-    allyteam_snapshots: BTreeMap<u32, Vec<AllyTeamSnapshotRecord>>,
-    command_history: Vec<CommandRecord>,
-    events: Vec<EventRecord>,
-    springie_stats: Vec<String>,
+    pub battle_id: u64,
+    pub replay_filename: String,
+    pub game_version: String,
+    pub engine_version: String,
+    pub map_name: Option<String>,
+    pub game_name: Option<String>,
+    pub zksearchtag: Option<String>,
+    pub players: Vec<PlayerMetadata>,
+    pub teams: Vec<TeamMetadata>,
+    pub map_size: Option<MapSize>,
+    pub global_snapshots: Vec<SnapshotRecord>,
+    pub allyteam_snapshots: BTreeMap<u32, Vec<AllyTeamSnapshotRecord>>,
+    pub command_history: Vec<CommandRecord>,
+    pub events: Vec<EventRecord>,
+    pub springie_stats: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct PlayerMetadata {
-    player_id: u32,
-    name: Option<String>,
-    team: Option<u32>,
-    spectator: bool,
-    elo: Option<i32>,
-    lobby_id: Option<u64>,
-    country_code: Option<String>,
-    clan: Option<String>,
-    level: Option<u32>,
+    pub player_id: u32,
+    pub name: Option<String>,
+    pub team: Option<u32>,
+    pub spectator: bool,
+    pub elo: Option<i32>,
+    pub lobby_id: Option<u64>,
+    pub country_code: Option<String>,
+    pub clan: Option<String>,
+    pub level: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct TeamMetadata {
-    team_id: u32,
-    allyteam: Option<u32>,
-    teamleader: Option<u32>,
-    handicap: Option<f32>,
+    pub team_id: u32,
+    pub allyteam: Option<u32>,
+    pub teamleader: Option<u32>,
+    pub handicap: Option<f32>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct MapSize {
     pub x: u32,
     pub z: u32,
@@ -107,14 +108,14 @@ struct WidgetMeta {
     map_size: MapSize,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct SnapshotRecord {
     pub frame: u32,
     pub game_seconds: f32,
     pub units: Vec<UnitSnapshot>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct AllyTeamSnapshotRecord {
     pub allyteam_id: u32,
     pub frame: u32,
@@ -123,7 +124,7 @@ pub struct AllyTeamSnapshotRecord {
     pub radar_contacts: Vec<RadarContact>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct UnitSnapshot {
     pub unit_id: u32,
     pub unit_def_name: String,
@@ -139,7 +140,7 @@ pub struct UnitSnapshot {
     pub experience: f32,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct RadarContact {
     pub unit_id: u32,
     pub team_id: i32,
@@ -149,16 +150,17 @@ pub struct RadarContact {
     pub z: f32,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct EventRecord {
     pub event_type: String,
     pub frame: u32,
     pub game_seconds: f32,
     #[serde(default)]
+    #[schema(value_type = Object)]
     pub payload: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct CommandRecord {
     pub frame: u32,
     pub game_seconds: f32,
@@ -172,7 +174,7 @@ pub struct CommandRecord {
     pub decoded: DecodedCommand,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct DecodedCommand {
     pub kind: String,
     pub option_flags: CommandOptionFlags,
@@ -183,12 +185,13 @@ pub struct DecodedCommand {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub build: Option<BuildCommand>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(no_recursion)]
     pub inserted: Option<InsertedCommand>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub removed: Option<RemovedCommand>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct CommandOptionFlags {
     pub alt: bool,
     pub ctrl: bool,
@@ -198,7 +201,7 @@ pub struct CommandOptionFlags {
     pub internal: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 #[serde(tag = "type")]
 pub enum DecodedTarget {
     Unit { unit_id: i32 },
@@ -206,7 +209,7 @@ pub enum DecodedTarget {
     Area { x: f32, y: f32, z: f32, radius: f32 },
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct BuildCommand {
     pub unit_def_id: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -221,16 +224,17 @@ pub struct BuildCommand {
     pub facing: Option<i32>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct InsertedCommand {
     pub index: i32,
     pub command_id: i32,
     pub options: u32,
     pub params: Vec<f32>,
+    #[schema(no_recursion)]
     pub decoded: Box<DecodedCommand>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct RemovedCommand {
     pub params: Vec<f32>,
     pub mode: String,
