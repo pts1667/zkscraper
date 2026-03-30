@@ -200,11 +200,26 @@ Optional bind override:
 cargo run --release --bin serve-db -- --db .\target\parsed-db --host 0.0.0.0 --port 8080
 ```
 
+Optional map asset support from a local Zero-K install:
+
+```powershell
+cargo run --release --bin serve-db -- --db .\target\parsed-db --zk-path <zero-k install>
+```
+
 Available endpoints:
 
 - `GET /healthz`
 - `GET /replays?offset=0&limit=100`
 - `GET /replays/{battle_id}`
+- `GET /maps/{map_name}/heightmap.bmp`
+- `GET /maps/{map_name}/features`
+
+Map asset behavior:
+
+- `--zk-path` points at a Zero-K portable install and serves archives from `<zk_path>\maps`
+- heightmaps are served as `512x512` greyscale BMP images
+- map features return JSON with `metal_spots` and placed `features`
+- `.sdz` and `.sd7` map archives are supported
 
 ## Stored Replay Structure
 

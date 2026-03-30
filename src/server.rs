@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     db::{ReplayDb, ReplayListResponse, ReplaySummary},
+    map_assets::{MapFeature, MapFeaturesResponse, MapService, MetalSpot},
     parse::{
         AllyTeamSnapshotRecord, BuildCommand, CommandOptionFlags, CommandRecord, DecodedCommand,
         DecodedTarget, EventRecord, InsertedCommand, MapSize, ParsedReplay, PlayerMetadata,
@@ -48,6 +49,7 @@ pub const MAX_LIMIT: usize = 1000;
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub db: ReplayDb,
+    pub maps: Option<MapService>,
     pub openapi_json: Arc<String>,
 }
 
@@ -112,7 +114,7 @@ impl IntoResponse for ApiError {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(healthz, list_replays, get_replay),
+    paths(healthz, list_replays, get_replay, get_map_heightmap, get_map_features),
     components(
         schemas(
             ApiErrorBody,
@@ -120,6 +122,9 @@ impl IntoResponse for ApiError {
             ReplayListQuery,
             ReplayListResponse,
             ReplaySummary,
+            MapFeaturesResponse,
+            MetalSpot,
+            MapFeature,
             ParsedReplay,
             PlayerMetadata,
             TeamMetadata,
@@ -145,13 +150,14 @@ impl IntoResponse for ApiError {
 )]
 struct ApiDoc;
 
-pub fn app_state(db: ReplayDb) -> AppState {
+pub fn app_state(db: ReplayDb, maps: Option<MapService>) -> AppState {
     let openapi_json = ApiDoc::openapi()
         .to_pretty_json()
         .expect("failed to serialize openapi document");
 
     AppState {
         db,
+        maps,
         openapi_json: Arc::new(openapi_json),
     }
 }
@@ -161,14 +167,20 @@ pub fn build_router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/replays", get(list_replays))
         .route("/replays/{battle_id}", get(get_replay))
+        .route("/maps/{map_name}/heightmap.bmp", get(get_map_heightmap))
+        .route("/maps/{map_name}/features", get(get_map_features))
         .route("/openapi.json", get(openapi_json))
         .route("/docs", get(swagger_ui))
         .with_state(state)
 }
 
-pub async fn serve(db: ReplayDb, bind_addr: SocketAddr) -> std::io::Result<()> {
+pub async fn serve(
+    db: ReplayDb,
+    maps: Option<MapService>,
+    bind_addr: SocketAddr,
+) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
-    axum::serve(listener, build_router(app_state(db))).await?;
+    axum::serve(listener, build_router(app_state(db, maps))).await?;
     Ok(())
 }
 
@@ -242,6 +254,74 @@ async fn get_replay(
     }
 }
 
+#[fastapi::path(
+    get,
+    path = "/maps/{map_name}/heightmap.bmp",
+    responses(
+        (status = 200, description = "512x512 greyscale BMP heightmap"),
+        (status = 404, description = "Map archive not found", body = ApiErrorBody),
+        (status = 503, description = "Map serving is not configured", body = ApiErrorBody),
+        (status = 500, description = "Map asset read failed", body = ApiErrorBody)
+    ),
+    params(
+        ("map_name" = String, Path, description = "Map name to fetch")
+    )
+)]
+async fn get_map_heightmap(
+    State(state): State<AppState>,
+    Path(map_name): Path<String>,
+) -> Result<Response, ApiError> {
+    let maps = state
+        .maps
+        .clone()
+        .ok_or_else(|| ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: "map serving is unavailable without --zk-path".to_string(),
+        })?;
+    let requested_map = map_name.clone();
+    let bmp = tokio::task::spawn_blocking(move || maps.heightmap_bmp(&requested_map))
+        .await
+        .map_err(|err| ApiError::internal(format!("map heightmap task failed: {err}")))?
+        .map_err(|err| map_asset_error(&map_name, err))?;
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, "image/bmp".parse().unwrap());
+    Ok((headers, bmp).into_response())
+}
+
+#[fastapi::path(
+    get,
+    path = "/maps/{map_name}/features",
+    responses(
+        (status = 200, description = "Map feature data", body = MapFeaturesResponse),
+        (status = 404, description = "Map archive not found", body = ApiErrorBody),
+        (status = 503, description = "Map serving is not configured", body = ApiErrorBody),
+        (status = 500, description = "Map asset read failed", body = ApiErrorBody)
+    ),
+    params(
+        ("map_name" = String, Path, description = "Map name to fetch")
+    )
+)]
+async fn get_map_features(
+    State(state): State<AppState>,
+    Path(map_name): Path<String>,
+) -> Result<Json<MapFeaturesResponse>, ApiError> {
+    let maps = state
+        .maps
+        .clone()
+        .ok_or_else(|| ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: "map serving is unavailable without --zk-path".to_string(),
+        })?;
+    let requested_map = map_name.clone();
+    let features = tokio::task::spawn_blocking(move || maps.map_features(&requested_map))
+        .await
+        .map_err(|err| ApiError::internal(format!("map feature task failed: {err}")))?
+        .map_err(|err| map_asset_error(&map_name, err))?;
+
+    Ok(Json(features))
+}
+
 async fn openapi_json(State(state): State<AppState>) -> Response {
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
@@ -252,17 +332,28 @@ async fn swagger_ui() -> Html<&'static str> {
     Html(SWAGGER_UI_HTML)
 }
 
+fn map_asset_error(map_name: &str, err: impl std::fmt::Display) -> ApiError {
+    let message = err.to_string();
+    if message.contains("not found") {
+        ApiError::not_found(format!("map '{map_name}' not found"))
+    } else {
+        ApiError::internal(format!("failed to read map '{map_name}': {message}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use axum::{
         body::{to_bytes, Body},
         http::{Request, StatusCode},
     };
+    use std::io::Write;
     use tower::ServiceExt;
 
     use super::{app_state, build_router};
     use crate::{
         db::ReplayDb,
+        map_assets::MapService,
         parse::{
             AllyTeamSnapshotRecord, CommandOptionFlags, CommandRecord, DecodedCommand,
             EventRecord, MapSize, ParsedReplay, PlayerMetadata, RadarContact, SnapshotRecord,
@@ -369,9 +460,57 @@ mod tests {
         }
     }
 
-    fn seeded_router() -> Result<axum::Router, Box<dyn std::error::Error + Send + Sync>> {
+    fn write_test_archive(
+        root: &std::path::Path,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let maps_dir = root.join("maps");
+        std::fs::create_dir_all(&maps_dir)?;
+        let archive_path = maps_dir.join("TestMap.sdz");
+        let file = std::fs::File::create(archive_path)?;
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+
+        let width = 64_u32;
+        let height = 64_u32;
+        let sample_width = width + 1;
+        let sample_height = height + 1;
+        let sample_count = (sample_width * sample_height) as usize;
+        let mut smf = Vec::new();
+        smf.extend_from_slice(b"spring map file");
+        smf.push(0);
+        smf.extend_from_slice(&1_u32.to_le_bytes());
+        smf.extend_from_slice(&0_u32.to_le_bytes());
+        smf.extend_from_slice(&1_u32.to_le_bytes());
+        smf.extend_from_slice(&1_u32.to_le_bytes());
+        smf.extend_from_slice(&8_u32.to_le_bytes());
+        smf.extend_from_slice(&8_u32.to_le_bytes());
+        smf.extend_from_slice(&32_u32.to_le_bytes());
+        smf.extend_from_slice(&0.0_f32.to_le_bytes());
+        smf.extend_from_slice(&255.0_f32.to_le_bytes());
+        smf.extend_from_slice(&76_u32.to_le_bytes());
+        smf.extend_from_slice(&0_u32.to_le_bytes());
+        smf.extend_from_slice(&0_u32.to_le_bytes());
+        smf.extend_from_slice(&0_u32.to_le_bytes());
+        smf.extend_from_slice(&0_u32.to_le_bytes());
+        smf.extend_from_slice(&0_u32.to_le_bytes());
+        for index in 0..sample_count {
+            smf.extend_from_slice(&((index % 2048) as u16).to_le_bytes());
+        }
+
+        writer.start_file("maps/TestMap.smf", options)?;
+        writer.write_all(&smf)?;
+        writer.start_file("mapconfig/map_metal_layout.lua", options)?;
+        writer.write_all(b"return { { x = 100, z = 200, metal = 2.5 } }")?;
+        writer.start_file("mapconfig/featureplacer/set.lua", options)?;
+        writer.write_all(b"return { { name = 'treetype1', x = 64, z = 96 } }")?;
+        writer.finish()?;
+        Ok(())
+    }
+
+    fn seeded_router(with_maps: bool) -> Result<axum::Router, Box<dyn std::error::Error + Send + Sync>> {
         let temp_dir = tempfile::tempdir()?;
-        let db = sled::open(temp_dir.path())?;
+        let temp_path = temp_dir.keep();
+        let db = sled::open(&temp_path)?;
         for battle_id in [10_u64, 2_u64] {
             let replay = sample_replay(battle_id);
             let payload = serde_json::to_vec(&replay)?;
@@ -381,13 +520,19 @@ mod tests {
         db.flush()?;
         drop(db);
 
-        let replay_db = ReplayDb::open(temp_dir.path())?;
-        Ok(build_router(app_state(replay_db)))
+        let replay_db = ReplayDb::open(&temp_path)?;
+        let maps = if with_maps {
+            write_test_archive(&temp_path)?;
+            Some(MapService::from_zk_path(&temp_path)?)
+        } else {
+            None
+        };
+        Ok(build_router(app_state(replay_db, maps)))
     }
 
     #[tokio::test]
     async fn healthz_route_works() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let app = seeded_router()?;
+        let app = seeded_router(false)?;
         let response = app
             .oneshot(Request::builder().uri("/healthz").body(Body::empty())?)
             .await?;
@@ -399,7 +544,7 @@ mod tests {
     #[tokio::test]
     async fn replay_list_is_paginated_and_sorted(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let app = seeded_router()?;
+        let app = seeded_router(false)?;
         let response = app
             .oneshot(Request::builder().uri("/replays?offset=0&limit=1").body(Body::empty())?)
             .await?;
@@ -413,7 +558,7 @@ mod tests {
 
     #[tokio::test]
     async fn replay_lookup_returns_404() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let app = seeded_router()?;
+        let app = seeded_router(false)?;
         let response = app
             .oneshot(Request::builder().uri("/replays/999").body(Body::empty())?)
             .await?;
@@ -425,7 +570,7 @@ mod tests {
     #[tokio::test]
     async fn openapi_route_exposes_replay_paths(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let app = seeded_router()?;
+        let app = seeded_router(false)?;
         let response = app
             .oneshot(Request::builder().uri("/openapi.json").body(Body::empty())?)
             .await?;
@@ -438,6 +583,38 @@ mod tests {
             .expect("openapi document should have paths");
         assert!(paths.contains_key("/replays"));
         assert!(paths.contains_key("/replays/{battle_id}"));
+        assert!(paths.contains_key("/maps/{map_name}/features"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn map_routes_serve_assets() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let app = seeded_router(true)?;
+
+        let bmp_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/maps/TestMap/heightmap.bmp")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(bmp_response.status(), StatusCode::OK);
+        let bmp = to_bytes(bmp_response.into_body(), usize::MAX).await?;
+        assert!(bmp.starts_with(b"BM"));
+
+        let features_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/maps/TestMap/features")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(features_response.status(), StatusCode::OK);
+        let body = to_bytes(features_response.into_body(), usize::MAX).await?;
+        let parsed: serde_json::Value = serde_json::from_slice(&body)?;
+        assert_eq!(parsed["metal_spots"][0]["x"], 100.0);
+        assert_eq!(parsed["features"][0]["name"], "treetype1");
         Ok(())
     }
 }
