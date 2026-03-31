@@ -141,7 +141,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             })
             .await
         }
-        Commands::DownloadMaps { battle_ids, zk_path } => {
+        Commands::DownloadMaps {
+            battle_ids,
+            zk_path,
+        } => {
             maps::download_maps(maps::DownloadMapsSettings {
                 site_url,
                 csv_path: battle_ids,

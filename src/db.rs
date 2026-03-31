@@ -78,12 +78,12 @@ impl ReplayDb {
         let mut indexed = entries
             .into_par_iter()
             .map(|(key, value)| {
-            let key = std::str::from_utf8(key.as_ref())
-                .map_err(|err| ReplayDbError::new(err.to_string()))?;
-            let battle_id = key.parse::<u64>().map_err(|err| {
-                ReplayDbError::new(format!("invalid battle id key '{key}': {err}"))
-            })?;
-            let summary = decode_replay_summary(value.as_ref())?;
+                let key = std::str::from_utf8(key.as_ref())
+                    .map_err(|err| ReplayDbError::new(err.to_string()))?;
+                let battle_id = key.parse::<u64>().map_err(|err| {
+                    ReplayDbError::new(format!("invalid battle id key '{key}': {err}"))
+                })?;
+                let summary = decode_replay_summary(value.as_ref())?;
                 Ok((battle_id, summary))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -202,7 +202,10 @@ impl ReplaySummary {
                 .as_str()
                 .unwrap_or_default()
                 .to_string(),
-            game_version: value["game_version"].as_str().unwrap_or_default().to_string(),
+            game_version: value["game_version"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
             engine_version: value["engine_version"]
                 .as_str()
                 .unwrap_or_default()
@@ -215,12 +218,15 @@ impl ReplaySummary {
             allyteam_snapshot_streams: allyteam_snapshots.map_or(0, |items| items.len()),
             allyteam_snapshot_frames: allyteam_snapshots
                 .map(|items| {
-                    items.values()
+                    items
+                        .values()
                         .map(|snapshots| snapshots.as_array().map_or(0, |frames| frames.len()))
                         .sum()
                 })
                 .unwrap_or(0),
-            commands: value["command_history"].as_array().map_or(0, |items| items.len()),
+            commands: value["command_history"]
+                .as_array()
+                .map_or(0, |items| items.len()),
             events: value["events"].as_array().map_or(0, |items| items.len()),
             first_snapshot_frame: global_snapshots
                 .and_then(|items| items.first())
@@ -254,8 +260,14 @@ impl From<&ParsedReplay> for ReplaySummary {
                 .sum(),
             commands: replay.command_history.len(),
             events: replay.events.len(),
-            first_snapshot_frame: replay.global_snapshots.first().map(|snapshot| snapshot.frame),
-            last_snapshot_frame: replay.global_snapshots.last().map(|snapshot| snapshot.frame),
+            first_snapshot_frame: replay
+                .global_snapshots
+                .first()
+                .map(|snapshot| snapshot.frame),
+            last_snapshot_frame: replay
+                .global_snapshots
+                .last()
+                .map(|snapshot| snapshot.frame),
         }
     }
 }
@@ -321,7 +333,10 @@ fn sanitize_snapshot_value(value: &mut serde_json::Value) {
         return;
     };
     sanitize_required_float(object.get_mut("game_seconds"));
-    if let Some(units) = object.get_mut("units").and_then(serde_json::Value::as_array_mut) {
+    if let Some(units) = object
+        .get_mut("units")
+        .and_then(serde_json::Value::as_array_mut)
+    {
         for unit in units {
             sanitize_unit_value(unit);
         }
@@ -392,7 +407,10 @@ fn sanitize_command_value(value: &mut serde_json::Value) {
 }
 
 fn sanitize_decoded_command_value(value: &mut serde_json::Map<String, serde_json::Value>) {
-    if let Some(target) = value.get_mut("target").and_then(serde_json::Value::as_object_mut) {
+    if let Some(target) = value
+        .get_mut("target")
+        .and_then(serde_json::Value::as_object_mut)
+    {
         match target.get("type").and_then(serde_json::Value::as_str) {
             Some("Position") | Some("position") => {
                 sanitize_required_float(target.get_mut("x"));
@@ -579,8 +597,7 @@ mod tests {
     }
 
     #[test]
-    fn lists_battle_ids_in_numeric_order() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn lists_battle_ids_in_numeric_order() -> Result<(), Box<dyn std::error::Error>> {
         let temp_dir = tempfile::tempdir()?;
         let db = sled::open(temp_dir.path())?;
         for battle_id in [10_u64, 2_u64] {

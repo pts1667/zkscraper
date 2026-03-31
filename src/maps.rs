@@ -122,7 +122,9 @@ async fn resolve_map_download_url_from_battle(
     client: &RateLimitedHttpClient,
     site_url: &Url,
 ) -> Result<Option<Url>, Box<dyn std::error::Error>> {
-    let battle_url = site_url.join("Battles/Detail/")?.join(&battle_id.to_string())?;
+    let battle_url = site_url
+        .join("Battles/Detail/")?
+        .join(&battle_id.to_string())?;
     let battle_html = client
         .send(client.raw().get(battle_url))
         .await?
@@ -140,8 +142,9 @@ async fn resolve_map_download_url_from_battle(
         .await?
         .text()
         .await?;
-    let map_download_re =
-        Regex::new(r#"(https?://zero-k\.info/content/(?:maps|games)/[^"']+\.sd[7z]|//zero-k\.info/content/(?:maps|games)/[^"']+\.sd[7z])"#)?;
+    let map_download_re = Regex::new(
+        r#"(https?://zero-k\.info/content/(?:maps|games)/[^"']+\.sd[7z]|//zero-k\.info/content/(?:maps|games)/[^"']+\.sd[7z])"#,
+    )?;
     let Some(download_match) = map_download_re.find(&map_html) else {
         return Ok(None);
     };
@@ -171,7 +174,10 @@ async fn download_map(
             .content_length()
             .map(|bytes| format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0)))
             .unwrap_or_else(|| "unknown size".to_string());
-        println!("Downloading map: {}.{} ({})", map_file_base, map_extension, size_label);
+        println!(
+            "Downloading map: {}.{} ({})",
+            map_file_base, map_extension, size_label
+        );
 
         let resolved_url = response.url().to_string();
         let bytes = response.bytes().await?;
@@ -181,7 +187,9 @@ async fn download_map(
         return Ok(());
     }
 
-    if let Some(download_url) = resolve_map_download_url_from_battle(battle_id, client, site_url).await? {
+    if let Some(download_url) =
+        resolve_map_download_url_from_battle(battle_id, client, site_url).await?
+    {
         let response = client.send(client.raw().get(download_url)).await?;
         if response.status().is_success() {
             let size_label = response

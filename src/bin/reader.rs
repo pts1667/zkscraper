@@ -80,7 +80,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "allyteam_snapshot_streams: {}",
                 summary.allyteam_snapshot_streams
             );
-            println!("allyteam_snapshot_frames: {}", summary.allyteam_snapshot_frames);
+            println!(
+                "allyteam_snapshot_frames: {}",
+                summary.allyteam_snapshot_frames
+            );
             println!("commands: {}", summary.commands);
             println!("events: {}", summary.events);
             println!(

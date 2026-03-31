@@ -1,7 +1,6 @@
 use std::{
     error::Error,
-    fs,
-    io,
+    fs, io,
     path::{Path, PathBuf},
 };
 
@@ -136,7 +135,12 @@ fn derive_pipeline_paths(settings: &PipelineSettings) -> Result<PipelinePaths, B
     let out_name = settings
         .out_path
         .file_name()
-        .ok_or_else(|| format!("output path '{}' must include a final directory name", settings.out_path.display()))?
+        .ok_or_else(|| {
+            format!(
+                "output path '{}' must include a final directory name",
+                settings.out_path.display()
+            )
+        })?
         .to_string_lossy()
         .to_string();
 
@@ -390,10 +394,22 @@ mod tests {
     #[test]
     fn derives_default_sibling_paths() {
         let paths = derive_pipeline_paths(&sample_settings()).unwrap();
-        assert_eq!(paths.battle_csv_path, PathBuf::from(r".\target\parsed-db.battles.csv"));
-        assert_eq!(paths.replay_dir_path, PathBuf::from(r".\target\parsed-db.replays"));
-        assert_eq!(paths.working_db_path, PathBuf::from(r".\target\parsed-db_tmp"));
-        assert_eq!(paths.fail_db_path, PathBuf::from(r".\target\parsed-db_fail"));
+        assert_eq!(
+            paths.battle_csv_path,
+            PathBuf::from(r".\target\parsed-db.battles.csv")
+        );
+        assert_eq!(
+            paths.replay_dir_path,
+            PathBuf::from(r".\target\parsed-db.replays")
+        );
+        assert_eq!(
+            paths.working_db_path,
+            PathBuf::from(r".\target\parsed-db_tmp")
+        );
+        assert_eq!(
+            paths.fail_db_path,
+            PathBuf::from(r".\target\parsed-db_fail")
+        );
     }
 
     #[test]
@@ -401,10 +417,22 @@ mod tests {
         let mut settings = sample_settings();
         settings.temp_root = Some(PathBuf::from(r".\target\pipeline-temp"));
         let paths = derive_pipeline_paths(&settings).unwrap();
-        assert_eq!(paths.battle_csv_path, PathBuf::from(r".\target\pipeline-temp\battles.csv"));
-        assert_eq!(paths.replay_dir_path, PathBuf::from(r".\target\pipeline-temp\replays"));
-        assert_eq!(paths.working_db_path, PathBuf::from(r".\target\pipeline-temp\working-db"));
-        assert_eq!(paths.fail_db_path, PathBuf::from(r".\target\parsed-db_fail"));
+        assert_eq!(
+            paths.battle_csv_path,
+            PathBuf::from(r".\target\pipeline-temp\battles.csv")
+        );
+        assert_eq!(
+            paths.replay_dir_path,
+            PathBuf::from(r".\target\pipeline-temp\replays")
+        );
+        assert_eq!(
+            paths.working_db_path,
+            PathBuf::from(r".\target\pipeline-temp\working-db")
+        );
+        assert_eq!(
+            paths.fail_db_path,
+            PathBuf::from(r".\target\parsed-db_fail")
+        );
     }
 
     #[test]

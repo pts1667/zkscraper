@@ -131,7 +131,8 @@ fn guess_local_map_archive(
     let prefix_matches: Vec<_> = local_maps
         .iter()
         .filter(|archive| {
-            archive.folded_stem.starts_with(&folded_key) || folded_key.starts_with(&archive.folded_stem)
+            archive.folded_stem.starts_with(&folded_key)
+                || folded_key.starts_with(&archive.folded_stem)
         })
         .collect();
     if prefix_matches.len() == 1 {
@@ -180,10 +181,12 @@ pub async fn gather_battle_ids(
     let map_thumbnail_re =
         Regex::new(r#"<img src='/Resources/(?<map_file>[^/'"]+?)\.(?:thumbnail|minimap)\.jpg'"#)?;
     let map_detail_re = Regex::new(r#"<a href="(?P<path>/Maps/Detail/\d+)""#)?;
-    let map_download_re =
-        Regex::new(r#"(https?://zero-k\.info/content/(?:maps|games)/(?P<filename>[^"']+\.(?:sd7|sdz))|//zero-k\.info/content/(?:maps|games)/(?P<filename_scheme_relative>[^"']+\.(?:sd7|sdz)))"#)?;
+    let map_download_re = Regex::new(
+        r#"(https?://zero-k\.info/content/(?:maps|games)/(?P<filename>[^"']+\.(?:sd7|sdz))|//zero-k\.info/content/(?:maps|games)/(?P<filename_scheme_relative>[^"']+\.(?:sd7|sdz)))"#,
+    )?;
 
-    let http_client = RateLimitedHttpClient::new(Duration::from_millis(settings.min_req_wait as u64));
+    let http_client =
+        RateLimitedHttpClient::new(Duration::from_millis(settings.min_req_wait as u64));
     let local_maps = load_local_map_archives(settings.zk_path.as_deref())?;
     let mut wtr = csv::Writer::from_path(settings.out_path)?;
 
@@ -199,9 +202,7 @@ pub async fn gather_battle_ids(
         req_form.insert("offset", offset.to_string());
 
         let body = http_client
-            .send(http_client.raw().post(req_url.clone())
-            .form(&req_form)
-            )
+            .send(http_client.raw().post(req_url.clone()).form(&req_form))
             .await?
             .bytes()
             .await?
@@ -209,23 +210,25 @@ pub async fn gather_battle_ids(
 
         let body_s = String::from_utf8(body)?;
 
-        let new_battle_ids = battle_card_block_re.captures_iter(&body_s).filter_map(|cap| {
-            let bid = cap.name("bid")?.as_str().to_string();
-            let card_html = cap.get(0)?.as_str();
-            let version = zero_k_version_re
-                .captures(card_html)?
-                .name("version")?
-                .as_str()
-                .trim()
-                .to_string();
-            let map_file = map_thumbnail_re
-                .captures(card_html)?
-                .name("map_file")?
-                .as_str()
-                .trim()
-                .to_string();
-            Some((version, bid, map_file))
-        });
+        let new_battle_ids = battle_card_block_re
+            .captures_iter(&body_s)
+            .filter_map(|cap| {
+                let bid = cap.name("bid")?.as_str().to_string();
+                let card_html = cap.get(0)?.as_str();
+                let version = zero_k_version_re
+                    .captures(card_html)?
+                    .name("version")?
+                    .as_str()
+                    .trim()
+                    .to_string();
+                let map_file = map_thumbnail_re
+                    .captures(card_html)?
+                    .name("map_file")?
+                    .as_str()
+                    .trim()
+                    .to_string();
+                Some((version, bid, map_file))
+            });
 
         let mut found_any = false;
         for (version, battle_id, map_key) in new_battle_ids {
@@ -270,21 +273,26 @@ pub async fn gather_battle_ids(
                         .await?;
 
                     let captures = map_download_re.captures(&map_html).ok_or_else(|| {
-                        format!("could not resolve map archive while gathering battle {}", battle_id)
+                        format!(
+                            "could not resolve map archive while gathering battle {}",
+                            battle_id
+                        )
                     })?;
                     let archive_filename = captures
                         .name("filename")
                         .or_else(|| captures.name("filename_scheme_relative"))
                         .map(|m| m.as_str().to_string())
                         .ok_or_else(|| {
-                            format!("could not extract map archive while gathering battle {}", battle_id)
+                            format!(
+                                "could not extract map archive while gathering battle {}",
+                                battle_id
+                            )
                         })?;
                     let decoded_filename = percent_decode_str(&archive_filename)
                         .decode_utf8()?
                         .to_string();
-                    let (archive_base, archive_extension) = decoded_filename
-                        .rsplit_once('.')
-                        .ok_or_else(|| {
+                    let (archive_base, archive_extension) =
+                        decoded_filename.rsplit_once('.').ok_or_else(|| {
                             format!(
                                 "map archive missing extension while gathering battle {}",
                                 battle_id
@@ -302,7 +310,11 @@ pub async fn gather_battle_ids(
         }
 
         if !found_any {
-            return Err(format!("gather-battle-ids found no parseable battle cards at offset {}", offset).into());
+            return Err(format!(
+                "gather-battle-ids found no parseable battle cards at offset {}",
+                offset
+            )
+            .into());
         }
 
         offset += 40;

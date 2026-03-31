@@ -114,36 +114,41 @@ impl IntoResponse for ApiError {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(healthz, list_replays, get_replay, list_maps, get_map_heightmap, get_map_features),
-    components(
-        schemas(
-            ApiErrorBody,
-            HealthResponse,
-            ReplayListQuery,
-            ReplayListResponse,
-            ReplaySummary,
-            MapListResponse,
-            MapFeaturesResponse,
-            MetalSpot,
-            MapFeature,
-            ParsedReplay,
-            PlayerMetadata,
-            TeamMetadata,
-            MapSize,
-            SnapshotRecord,
-            AllyTeamSnapshotRecord,
-            UnitSnapshot,
-            RadarContact,
-            EventRecord,
-            CommandRecord,
-            DecodedCommand,
-            CommandOptionFlags,
-            DecodedTarget,
-            BuildCommand,
-            InsertedCommand,
-            RemovedCommand
-        )
+    paths(
+        healthz,
+        list_replays,
+        get_replay,
+        list_maps,
+        get_map_heightmap,
+        get_map_features
     ),
+    components(schemas(
+        ApiErrorBody,
+        HealthResponse,
+        ReplayListQuery,
+        ReplayListResponse,
+        ReplaySummary,
+        MapListResponse,
+        MapFeaturesResponse,
+        MetalSpot,
+        MapFeature,
+        ParsedReplay,
+        PlayerMetadata,
+        TeamMetadata,
+        MapSize,
+        SnapshotRecord,
+        AllyTeamSnapshotRecord,
+        UnitSnapshot,
+        RadarContact,
+        EventRecord,
+        CommandRecord,
+        DecodedCommand,
+        CommandOptionFlags,
+        DecodedTarget,
+        BuildCommand,
+        InsertedCommand,
+        RemovedCommand
+    )),
     info(
         title = "zkscraper Replay DB API",
         description = "Read-only HTTP API for a parsed replay sled database"
@@ -252,7 +257,9 @@ async fn get_replay(
 
     match replay {
         Some(replay) => Ok(Json(replay)),
-        None => Err(ApiError::not_found(format!("battle_id {battle_id} not found"))),
+        None => Err(ApiError::not_found(format!(
+            "battle_id {battle_id} not found"
+        ))),
     }
 }
 
@@ -266,13 +273,10 @@ async fn get_replay(
     )
 )]
 async fn list_maps(State(state): State<AppState>) -> Result<Json<MapListResponse>, ApiError> {
-    let maps = state
-        .maps
-        .clone()
-        .ok_or_else(|| ApiError {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            message: "map serving is unavailable without --zk-path".to_string(),
-        })?;
+    let maps = state.maps.clone().ok_or_else(|| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        message: "map serving is unavailable without --zk-path".to_string(),
+    })?;
     let response = tokio::task::spawn_blocking(move || maps.list_maps())
         .await
         .map_err(|err| ApiError::internal(format!("map list task failed: {err}")))?
@@ -298,13 +302,10 @@ async fn get_map_heightmap(
     State(state): State<AppState>,
     Path(map_name): Path<String>,
 ) -> Result<Response, ApiError> {
-    let maps = state
-        .maps
-        .clone()
-        .ok_or_else(|| ApiError {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            message: "map serving is unavailable without --zk-path".to_string(),
-        })?;
+    let maps = state.maps.clone().ok_or_else(|| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        message: "map serving is unavailable without --zk-path".to_string(),
+    })?;
     let requested_map = map_name.clone();
     let bmp = tokio::task::spawn_blocking(move || maps.heightmap_bmp(&requested_map))
         .await
@@ -333,13 +334,10 @@ async fn get_map_features(
     State(state): State<AppState>,
     Path(map_name): Path<String>,
 ) -> Result<Json<MapFeaturesResponse>, ApiError> {
-    let maps = state
-        .maps
-        .clone()
-        .ok_or_else(|| ApiError {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            message: "map serving is unavailable without --zk-path".to_string(),
-        })?;
+    let maps = state.maps.clone().ok_or_else(|| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        message: "map serving is unavailable without --zk-path".to_string(),
+    })?;
     let requested_map = map_name.clone();
     let features = tokio::task::spawn_blocking(move || maps.map_features(&requested_map))
         .await
@@ -382,9 +380,9 @@ mod tests {
         db::ReplayDb,
         map_assets::MapService,
         parse::{
-            AllyTeamSnapshotRecord, CommandOptionFlags, CommandRecord, DecodedCommand,
-            EventRecord, MapSize, ParsedReplay, PlayerMetadata, RadarContact, SnapshotRecord,
-            TeamMetadata, UnitSnapshot,
+            AllyTeamSnapshotRecord, CommandOptionFlags, CommandRecord, DecodedCommand, EventRecord,
+            MapSize, ParsedReplay, PlayerMetadata, RadarContact, SnapshotRecord, TeamMetadata,
+            UnitSnapshot,
         },
     };
 
@@ -535,7 +533,9 @@ mod tests {
         Ok(())
     }
 
-    fn seeded_router(with_maps: bool) -> Result<axum::Router, Box<dyn std::error::Error + Send + Sync>> {
+    fn seeded_router(
+        with_maps: bool,
+    ) -> Result<axum::Router, Box<dyn std::error::Error + Send + Sync>> {
         let temp_dir = tempfile::tempdir()?;
         let temp_path = temp_dir.keep();
         let db = sled::open(&temp_path)?;
@@ -574,7 +574,11 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let app = seeded_router(false)?;
         let response = app
-            .oneshot(Request::builder().uri("/replays?offset=0&limit=1").body(Body::empty())?)
+            .oneshot(
+                Request::builder()
+                    .uri("/replays?offset=0&limit=1")
+                    .body(Body::empty())?,
+            )
             .await?;
 
         assert_eq!(response.status(), StatusCode::OK);
@@ -600,7 +604,11 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let app = seeded_router(false)?;
         let response = app
-            .oneshot(Request::builder().uri("/openapi.json").body(Body::empty())?)
+            .oneshot(
+                Request::builder()
+                    .uri("/openapi.json")
+                    .body(Body::empty())?,
+            )
             .await?;
 
         assert_eq!(response.status(), StatusCode::OK);
@@ -658,7 +666,9 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await?;
         let parsed: serde_json::Value = serde_json::from_slice(&body)?;
-        let items = parsed["items"].as_array().expect("items should be an array");
+        let items = parsed["items"]
+            .as_array()
+            .expect("items should be an array");
         assert!(items.iter().any(|item| item == "TestMap"));
         Ok(())
     }

@@ -1,7 +1,5 @@
 use std::{
-    env,
-    fmt,
-    fs,
+    env, fmt, fs,
     io::{Cursor, Read},
     num::NonZeroUsize,
     path::{Path, PathBuf},
@@ -166,7 +164,9 @@ impl MapService {
     pub fn list_maps(&self) -> Result<MapListResponse, MapAssetError> {
         let mut map_names = Vec::new();
 
-        for entry in fs::read_dir(&self.maps_dir).map_err(|err| MapAssetError::new(err.to_string()))? {
+        for entry in
+            fs::read_dir(&self.maps_dir).map_err(|err| MapAssetError::new(err.to_string()))?
+        {
             let entry = entry.map_err(|err| MapAssetError::new(err.to_string()))?;
             let path = entry.path();
             let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
@@ -205,7 +205,9 @@ impl MapService {
         let mut prefix_matches = Vec::new();
         let mut fallbacks = Vec::new();
 
-        for entry in fs::read_dir(&self.maps_dir).map_err(|err| MapAssetError::new(err.to_string()))? {
+        for entry in
+            fs::read_dir(&self.maps_dir).map_err(|err| MapAssetError::new(err.to_string()))?
+        {
             let entry = entry.map_err(|err| MapAssetError::new(err.to_string()))?;
             let path = entry.path();
             let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
@@ -244,13 +246,16 @@ impl MapService {
             }
         }
 
-        Err(MapAssetError::new(format!("map archive not found for '{map_name}'")))
+        Err(MapAssetError::new(format!(
+            "map archive not found for '{map_name}'"
+        )))
     }
 
     fn list_archive_entries(&self, archive: &ArchiveKind) -> Result<Vec<String>, MapAssetError> {
         match archive {
             ArchiveKind::Zip(path) => {
-                let file = fs::File::open(path).map_err(|err| MapAssetError::new(err.to_string()))?;
+                let file =
+                    fs::File::open(path).map_err(|err| MapAssetError::new(err.to_string()))?;
                 let mut archive =
                     ZipArchive::new(file).map_err(|err| MapAssetError::new(err.to_string()))?;
                 let mut names = Vec::with_capacity(archive.len());
@@ -262,16 +267,14 @@ impl MapService {
                 }
                 Ok(names)
             }
-            ArchiveKind::SevenZip(path) => {
-                match Archive::open(path) {
-                    Ok(archive) => Ok(archive
-                        .files
-                        .iter()
-                        .map(|entry| normalize_archive_path(entry.name()))
-                        .collect()),
-                    Err(_) => list_archive_entries_with_7z(path),
-                }
-            }
+            ArchiveKind::SevenZip(path) => match Archive::open(path) {
+                Ok(archive) => Ok(archive
+                    .files
+                    .iter()
+                    .map(|entry| normalize_archive_path(entry.name()))
+                    .collect()),
+                Err(_) => list_archive_entries_with_7z(path),
+            },
         }
     }
 
@@ -281,7 +284,8 @@ impl MapService {
     ) -> Result<Vec<String>, MapAssetError> {
         match archive {
             ArchiveKind::Zip(path) => {
-                let file = fs::File::open(path).map_err(|err| MapAssetError::new(err.to_string()))?;
+                let file =
+                    fs::File::open(path).map_err(|err| MapAssetError::new(err.to_string()))?;
                 let mut archive =
                     ZipArchive::new(file).map_err(|err| MapAssetError::new(err.to_string()))?;
                 let mut names = Vec::with_capacity(archive.len());
@@ -375,7 +379,8 @@ impl MapService {
         let requested = normalize_archive_path(relative_path);
         match archive {
             ArchiveKind::Zip(path) => {
-                let file = fs::File::open(path).map_err(|err| MapAssetError::new(err.to_string()))?;
+                let file =
+                    fs::File::open(path).map_err(|err| MapAssetError::new(err.to_string()))?;
                 let mut archive =
                     ZipArchive::new(file).map_err(|err| MapAssetError::new(err.to_string()))?;
                 for index in 0..archive.len() {
@@ -391,17 +396,15 @@ impl MapService {
                     }
                 }
             }
-            ArchiveKind::SevenZip(path) => {
-                match read_sevenz_file(path, &requested) {
-                    Ok(bytes) => return Ok(bytes),
-                    Err(primary_err) => {
-                        if let Ok(bytes) = read_sevenz_file_with_7z(path, &requested) {
-                            return Ok(bytes);
-                        }
-                        return Err(primary_err);
+            ArchiveKind::SevenZip(path) => match read_sevenz_file(path, &requested) {
+                Ok(bytes) => return Ok(bytes),
+                Err(primary_err) => {
+                    if let Ok(bytes) = read_sevenz_file_with_7z(path, &requested) {
+                        return Ok(bytes);
                     }
+                    return Err(primary_err);
                 }
-            }
+            },
         }
 
         Err(MapAssetError::new(format!(
@@ -523,7 +526,12 @@ fn build_heightmap_image(
         image.put_pixel(x, y, Luma([value]));
     }
 
-    Ok(image::imageops::resize(&image, 512, 512, FilterType::Triangle))
+    Ok(image::imageops::resize(
+        &image,
+        512,
+        512,
+        FilterType::Triangle,
+    ))
 }
 
 fn parse_metal_spots(contents: &str) -> Vec<MetalSpot> {
@@ -817,8 +825,8 @@ mod tests {
     }
 
     #[test]
-    fn lists_available_maps_from_archives(
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    fn lists_available_maps_from_archives() -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    {
         let temp_dir = tempfile::tempdir()?;
         write_test_archive(temp_dir.path())?;
 

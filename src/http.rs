@@ -75,10 +75,7 @@ fn should_retry(status: reqwest::StatusCode) -> bool {
 }
 
 fn parse_retry_after_seconds(value: &str) -> Option<Duration> {
-    value.trim()
-        .parse::<u64>()
-        .ok()
-        .map(Duration::from_secs)
+    value.trim().parse::<u64>().ok().map(Duration::from_secs)
 }
 
 fn backoff_for_attempt(attempt: usize) -> Duration {
