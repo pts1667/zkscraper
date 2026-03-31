@@ -40,6 +40,7 @@ local economySnapshotFile
 local eventFile
 local captureDir
 local snapshotFrames = 120
+local replaySpeed = 1000
 local didQuit = false
 local replayStarted = false
 local allyTeamIDs = {}
@@ -326,10 +327,10 @@ local function quitReplay()
 	spSendCommands("quitforce")
 end
 
-local function bumpReplaySpeed()
+local function forceReplaySpeed()
 	spSendCommands("pause 0")
-	spSendCommands("setminspeed 50")
-	spSendCommands("setminspeed 0.1")
+	spSendCommands("setminspeed " .. replaySpeed)
+	spSendCommands("setmaxspeed " .. replaySpeed)
 end
 
 function widget:Initialize()
@@ -346,6 +347,7 @@ function widget:Initialize()
 
 	captureDir = spGetConfigString("ZKHeadlessOutputDir", "")
 	snapshotFrames = spGetConfigInt("ZKHeadlessSnapshotFrames", 120) or 120
+	replaySpeed = spGetConfigInt("ZKHeadlessReplaySpeed", 1000) or 1000
 	if captureDir == "" then
 		spEcho("<ZKScraper> No configured output directory. Widget removed.")
 		widgetHandler:RemoveWidget()
@@ -404,11 +406,12 @@ function widget:Initialize()
 	writeEvent("capture_started", spGetGameFrame(), objectToJson({
 		"\"battle_id\":" .. jsonNumber(spGetConfigInt("ZKHeadlessBattleId", -1)),
 		"\"snapshot_frames\":" .. jsonNumber(snapshotFrames),
+		"\"replay_speed\":" .. jsonNumber(replaySpeed),
 	}))
 
 	spSendCommands("forcestart")
 	spSendCommands("skip 0")
-	bumpReplaySpeed()
+	forceReplaySpeed()
 end
 
 function widget:Shutdown()
@@ -416,6 +419,9 @@ function widget:Shutdown()
 end
 
 function widget:GameFrame(frame)
+	if frame % 30 == 0 then
+		forceReplaySpeed()
+	end
 	if frame % snapshotFrames == 0 then
 		writeSnapshot(frame)
 		writeAllyTeamSnapshots(frame)
@@ -429,7 +435,7 @@ function widget:AddConsoleMessage(msg)
 	end
 	if msg and msg.text == "Beginning demo playback" then
 		replayStarted = true
-		bumpReplaySpeed()
+		forceReplaySpeed()
 	end
 end
 

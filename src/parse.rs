@@ -13,6 +13,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tokio::{
     process::{Child, Command},
+    signal,
     time::{sleep, Duration, Instant},
 };
 
@@ -276,7 +277,7 @@ pub async fn parse_replays(
     let config_dir = settings.zk_path.join("LuaUI").join("Config");
     let swapped_configs = activate_scraper_configs(&config_dir)?;
 
-    let parse_result: Result<(), Box<dyn std::error::Error>> = async {
+    let parse_future = async {
         validate_local_widgets_enabled(&settings.zk_path)?;
 
         let manifest = read_manifest(&settings.sdfz_in.join(MANIFEST_FILENAME))?;
@@ -405,8 +406,17 @@ pub async fn parse_replays(
             )
             .into())
         }
-    }
-    .await;
+    };
+
+    let parse_result: Result<(), Box<dyn std::error::Error>> = tokio::select! {
+        result = parse_future => result,
+        signal_result = signal::ctrl_c() => {
+            match signal_result {
+                Ok(()) => Err("parse interrupted by Ctrl+C".into()),
+                Err(err) => Err(format!("failed to listen for Ctrl+C: {err}").into()),
+            }
+        }
+    };
 
     let restore_result = restore_scraper_configs(&swapped_configs);
     match (parse_result, restore_result) {
