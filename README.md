@@ -3,11 +3,14 @@
 Scrapes zero-k.info and gathers replays into snapshots.
 Can auto-download missing maps.
 
+Currently, can't support maps that generate their terrain through scripts (Violet etc.), though this can be added if requested.
+
 ## Requirements
 
 - Rust toolchain with `cargo`
 - network access to `https://zero-k.info`
 - a working local Zero-K portable install
+- `mono` on Linux (Zero-K portable install already requires this)
 
 Note: Linux/MacOS builds are untested.
 
