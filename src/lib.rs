@@ -5,4 +5,5 @@ pub mod http;
 pub mod map_assets;
 pub mod maps;
 pub mod parse;
+pub mod pipeline;
 pub mod server;

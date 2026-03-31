@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     db::{ReplayDb, ReplayListResponse, ReplaySummary},
-    map_assets::{MapFeature, MapFeaturesResponse, MapService, MetalSpot},
+    map_assets::{MapFeature, MapFeaturesResponse, MapListResponse, MapService, MetalSpot},
     parse::{
         AllyTeamSnapshotRecord, BuildCommand, CommandOptionFlags, CommandRecord, DecodedCommand,
         DecodedTarget, EventRecord, InsertedCommand, MapSize, ParsedReplay, PlayerMetadata,
@@ -114,7 +114,7 @@ impl IntoResponse for ApiError {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(healthz, list_replays, get_replay, get_map_heightmap, get_map_features),
+    paths(healthz, list_replays, get_replay, list_maps, get_map_heightmap, get_map_features),
     components(
         schemas(
             ApiErrorBody,
@@ -122,6 +122,7 @@ impl IntoResponse for ApiError {
             ReplayListQuery,
             ReplayListResponse,
             ReplaySummary,
+            MapListResponse,
             MapFeaturesResponse,
             MetalSpot,
             MapFeature,
@@ -167,6 +168,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/replays", get(list_replays))
         .route("/replays/{battle_id}", get(get_replay))
+        .route("/maps", get(list_maps))
         .route("/maps/{map_name}/heightmap.bmp", get(get_map_heightmap))
         .route("/maps/{map_name}/features", get(get_map_features))
         .route("/openapi.json", get(openapi_json))
@@ -252,6 +254,31 @@ async fn get_replay(
         Some(replay) => Ok(Json(replay)),
         None => Err(ApiError::not_found(format!("battle_id {battle_id} not found"))),
     }
+}
+
+#[fastapi::path(
+    get,
+    path = "/maps",
+    responses(
+        (status = 200, description = "Available maps from the local Zero-K maps directory", body = MapListResponse),
+        (status = 503, description = "Map serving is not configured", body = ApiErrorBody),
+        (status = 500, description = "Map list read failed", body = ApiErrorBody)
+    )
+)]
+async fn list_maps(State(state): State<AppState>) -> Result<Json<MapListResponse>, ApiError> {
+    let maps = state
+        .maps
+        .clone()
+        .ok_or_else(|| ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: "map serving is unavailable without --zk-path".to_string(),
+        })?;
+    let response = tokio::task::spawn_blocking(move || maps.list_maps())
+        .await
+        .map_err(|err| ApiError::internal(format!("map list task failed: {err}")))?
+        .map_err(|err| ApiError::internal(format!("failed to list maps: {err}")))?;
+
+    Ok(Json(response))
 }
 
 #[fastapi::path(
@@ -582,6 +609,7 @@ mod tests {
             .as_object()
             .expect("openapi document should have paths");
         assert!(paths.contains_key("/replays"));
+        assert!(paths.contains_key("/maps"));
         assert!(paths.contains_key("/replays/{battle_id}"));
         assert!(paths.contains_key("/maps/{map_name}/features"));
         Ok(())
@@ -615,6 +643,22 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_slice(&body)?;
         assert_eq!(parsed["metal_spots"][0]["x"], 100.0);
         assert_eq!(parsed["features"][0]["name"], "treetype1");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn map_list_route_lists_available_maps(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let app = seeded_router(true)?;
+        let response = app
+            .oneshot(Request::builder().uri("/maps").body(Body::empty())?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await?;
+        let parsed: serde_json::Value = serde_json::from_slice(&body)?;
+        let items = parsed["items"].as_array().expect("items should be an array");
+        assert!(items.iter().any(|item| item == "TestMap"));
         Ok(())
     }
 }

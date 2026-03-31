@@ -20,7 +20,6 @@ const MANIFEST_FILENAME: &str = "replay_manifest.csv";
 const WIDGET_LINK_NAME: &str = "zkscraper_replay_snapshot.lua";
 const WIDGET_DISPLAY_NAME: &str = "ZKScraper Replay Snapshot";
 const ZK_CAPTURE_ROOT: &str = "LuaUI/Logs/zkscraper";
-const ORDER_FILENAME: &str = "LuaUI/Config/ZK_order.lua";
 const SNAPSHOT_FRAMES: u32 = 120;
 const WATCHDOG_POLL_MS: u64 = 250;
 const WATCHDOG_TOTAL_TIMEOUT_SECS: u64 = 300;
@@ -243,134 +242,142 @@ pub struct RemovedCommand {
 pub async fn parse_replays(
     settings: ParseReplaySettings,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    validate_local_widgets_enabled(&settings.zk_path)?;
+    let config_dir = settings.zk_path.join("LuaUI").join("Config");
+    let swapped_configs = activate_scraper_configs(&config_dir)?;
 
-    let manifest = read_manifest(&settings.sdfz_in.join(MANIFEST_FILENAME))?;
-    let db = sled::open(&settings.snapshot_path)?;
-    let temp_root = settings.snapshot_path.join("_tmp");
-    let zk_capture_root = settings.zk_path.join(ZK_CAPTURE_ROOT);
-    fs::create_dir_all(&temp_root)?;
-    fs::create_dir_all(&zk_capture_root)?;
+    let parse_result: Result<(), Box<dyn std::error::Error>> = async {
+        validate_local_widgets_enabled(&settings.zk_path)?;
 
-    let widget_source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("zk")
-        .join("Widgets")
-        .join("replay_snapshot.lua");
-    let widget_target = settings
-        .zk_path
-        .join("LuaUI")
-        .join("Widgets")
-        .join(WIDGET_LINK_NAME);
-    let order_path = settings.zk_path.join(ORDER_FILENAME);
+        let manifest = read_manifest(&settings.sdfz_in.join(MANIFEST_FILENAME))?;
+        let db = sled::open(&settings.snapshot_path)?;
+        let temp_root = settings.snapshot_path.join("_tmp");
+        let zk_capture_root = settings.zk_path.join(ZK_CAPTURE_ROOT);
+        fs::create_dir_all(&temp_root)?;
+        fs::create_dir_all(&zk_capture_root)?;
 
-    let pb = ProgressBar::new(manifest.len() as u64);
-    let mut failures = Vec::new();
-    for entry in manifest {
-        let key = entry.battle_id.to_string();
-        if db.contains_key(key.as_bytes())? {
-            pb.inc(1);
-            continue;
-        }
+        let widget_source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("zk")
+            .join("Widgets")
+            .join("replay_snapshot.lua");
+        let widget_target = settings
+            .zk_path
+            .join("LuaUI")
+            .join("Widgets")
+            .join(WIDGET_LINK_NAME);
 
-        let replay_path = settings.sdfz_in.join(&entry.replay_filename);
-        if !replay_path.is_file() {
-            eprintln!(
-                "Parse failed for battle {}: replay file from manifest does not exist: {}",
-                entry.battle_id,
-                replay_path.display()
-            );
-            failures.push(format!("{} ({})", entry.battle_id, entry.replay_filename));
-            pb.inc(1);
-            continue;
-        }
+        let pb = ProgressBar::new(manifest.len() as u64);
+        let mut failures = Vec::new();
+        for entry in manifest {
+            let key = entry.battle_id.to_string();
+            if db.contains_key(key.as_bytes())? {
+                pb.inc(1);
+                continue;
+            }
 
-        let replay_outcome: Result<(), Box<dyn std::error::Error>> = async {
-            let mut dem_info = read_dem_info(&replay_path)?;
-            let mut unit_name_cache = HashMap::new();
-            enrich_command_history_with_unit_names(
-                &mut dem_info.command_history,
-                &dem_info.script,
-                Some(&settings.zk_path),
-                &mut unit_name_cache,
-            )?;
-            let script_metadata = parse_game_script(&dem_info.script)?;
-            let headless = resolve_engine_binary(&settings.zk_path, &dem_info.engine_version)?;
+            let replay_path = settings.sdfz_in.join(&entry.replay_filename);
+            if !replay_path.is_file() {
+                eprintln!(
+                    "Parse failed for battle {}: replay file from manifest does not exist: {}",
+                    entry.battle_id,
+                    replay_path.display()
+                );
+                failures.push(format!("{} ({})", entry.battle_id, entry.replay_filename));
+                pb.inc(1);
+                continue;
+            }
 
-            let replay_temp_dir = temp_root.join(entry.battle_id.to_string());
-            let capture_dir = zk_capture_root.join(entry.battle_id.to_string());
-            fs::create_dir_all(&capture_dir)?;
-            let config_path = replay_temp_dir.join("springsettings-headless.cfg");
-            let order_backup_path = replay_temp_dir.join("ZK_order.backup.lua");
+            let replay_outcome: Result<(), Box<dyn std::error::Error>> = async {
+                let mut dem_info = read_dem_info(&replay_path)?;
+                let mut unit_name_cache = HashMap::new();
+                enrich_command_history_with_unit_names(
+                    &mut dem_info.command_history,
+                    &dem_info.script,
+                    Some(&settings.zk_path),
+                    &mut unit_name_cache,
+                )?;
+                let script_metadata = parse_game_script(&dem_info.script)?;
+                let headless = resolve_engine_binary(&settings.zk_path, &dem_info.engine_version)?;
 
-            let replay_result = run_single_replay(
-                &widget_source,
-                &widget_target,
-                &order_path,
-                &order_backup_path,
-                &config_path,
-                &capture_dir,
-                &headless,
-                &settings.zk_path,
-                &replay_path,
-                entry.battle_id,
-            )
+                let replay_temp_dir = temp_root.join(entry.battle_id.to_string());
+                let capture_dir = zk_capture_root.join(entry.battle_id.to_string());
+                fs::create_dir_all(&capture_dir)?;
+                let config_path = replay_temp_dir.join("springsettings-headless.cfg");
+
+                let replay_result = run_single_replay(
+                    &widget_source,
+                    &widget_target,
+                    &config_path,
+                    &capture_dir,
+                    &headless,
+                    &settings.zk_path,
+                    &replay_path,
+                    entry.battle_id,
+                )
+                .await;
+
+                let cleanup_result =
+                    cleanup_replay_artifacts(&widget_target, &replay_temp_dir, &capture_dir);
+                let (widget_meta, global_snapshots, allyteam_snapshots, events) = replay_result?;
+                cleanup_result?;
+
+                let parsed = ParsedReplay {
+                    battle_id: entry.battle_id,
+                    replay_filename: entry.replay_filename.clone(),
+                    game_version: entry.game_version.clone(),
+                    engine_version: dem_info.engine_version,
+                    map_name: script_metadata.map_name,
+                    game_name: script_metadata.game_name,
+                    zksearchtag: script_metadata.zksearchtag,
+                    players: script_metadata.players,
+                    teams: script_metadata.teams,
+                    map_size: Some(widget_meta.map_size),
+                    global_snapshots,
+                    allyteam_snapshots,
+                    command_history: dem_info.command_history,
+                    events,
+                    springie_stats: dem_info.springie_stats,
+                };
+
+                let payload = serde_json::to_vec(&parsed)?;
+                let compressed = zstd::encode_all(payload.as_slice(), 3)?;
+                db.insert(key.as_bytes(), compressed)?;
+                db.flush()?;
+                Ok(())
+            }
             .await;
 
-            let cleanup_result = cleanup_replay_artifacts(
-                &widget_target,
-                &order_path,
-                &order_backup_path,
-                &replay_temp_dir,
-                &capture_dir,
-            );
-            let (widget_meta, global_snapshots, allyteam_snapshots, events) = replay_result?;
-            cleanup_result?;
+            if let Err(err) = replay_outcome {
+                eprintln!(
+                    "Parse failed for battle {} ({}): {}",
+                    entry.battle_id, entry.replay_filename, err
+                );
+                failures.push(format!("{} ({})", entry.battle_id, entry.replay_filename));
+            }
+            pb.inc(1);
+        }
 
-            let parsed = ParsedReplay {
-                battle_id: entry.battle_id,
-                replay_filename: entry.replay_filename.clone(),
-                game_version: entry.game_version.clone(),
-                engine_version: dem_info.engine_version,
-                map_name: script_metadata.map_name,
-                game_name: script_metadata.game_name,
-                zksearchtag: script_metadata.zksearchtag,
-                players: script_metadata.players,
-                teams: script_metadata.teams,
-                map_size: Some(widget_meta.map_size),
-                global_snapshots,
-                allyteam_snapshots,
-                command_history: dem_info.command_history,
-                events,
-                springie_stats: dem_info.springie_stats,
-            };
-
-            let payload = serde_json::to_vec(&parsed)?;
-            let compressed = zstd::encode_all(payload.as_slice(), 3)?;
-            db.insert(key.as_bytes(), compressed)?;
-            db.flush()?;
+        if failures.is_empty() {
             Ok(())
+        } else {
+            Err(format!(
+                "failed to parse {} replay(s): {}",
+                failures.len(),
+                failures.join(", ")
+            )
+            .into())
         }
-        .await;
-
-        if let Err(err) = replay_outcome {
-            eprintln!(
-                "Parse failed for battle {} ({}): {}",
-                entry.battle_id, entry.replay_filename, err
-            );
-            failures.push(format!("{} ({})", entry.battle_id, entry.replay_filename));
-        }
-        pb.inc(1);
     }
+    .await;
 
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "failed to parse {} replay(s): {}",
-            failures.len(),
-            failures.join(", ")
+    let restore_result = restore_scraper_configs(&swapped_configs);
+    match (parse_result, restore_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(parse_err), Ok(())) => Err(parse_err),
+        (Ok(()), Err(restore_err)) => Err(restore_err),
+        (Err(parse_err), Err(restore_err)) => Err(format!(
+            "parse failed: {parse_err}; also failed to restore scraper configs: {restore_err}"
         )
-        .into())
+        .into()),
     }
 }
 
@@ -448,8 +455,6 @@ pub async fn backfill_commands(
 async fn run_single_replay(
     widget_source: &Path,
     widget_target: &Path,
-    order_path: &Path,
-    order_backup_path: &Path,
     config_path: &Path,
     capture_dir: &Path,
     headless: &Path,
@@ -466,7 +471,6 @@ async fn run_single_replay(
     Box<dyn std::error::Error>,
 > {
     install_widget(widget_source, widget_target)?;
-    install_parser_order(order_path, order_backup_path)?;
     let absolute_zk_path = absolute_path(zk_path)?;
     let absolute_config_path = absolute_path(config_path)?;
     let absolute_replay_path = absolute_path(replay_path)?;
@@ -688,52 +692,6 @@ fn capture_size(capture_dir: &Path) -> u64 {
         .filter_map(|name| fs::metadata(capture_dir.join(name)).ok())
         .map(|meta| meta.len())
         .sum()
-}
-
-fn install_parser_order(
-    order_path: &Path,
-    backup_path: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(parent) = backup_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let existing = if order_path.is_file() {
-        let content = fs::read_to_string(order_path)?;
-        fs::copy(order_path, backup_path)?;
-        content
-    } else {
-        String::new()
-    };
-
-    let key_re = Regex::new(r#"(?m)^\s*(?:\["([^"]+)"\]|([A-Za-z0-9_]+))\s*="#)?;
-    let mut keys = Vec::new();
-    for captures in key_re.captures_iter(&existing) {
-        let key = captures
-            .get(1)
-            .or_else(|| captures.get(2))
-            .map(|m| m.as_str())
-            .unwrap_or_default();
-        if key != "version" && key != "lastWidgetDetailLevel" {
-            keys.push(key.to_string());
-        }
-    }
-    keys.sort();
-    keys.dedup();
-
-    let mut parser_order = String::from("-- Widget Order List  (0 disables a widget)\nreturn {\n");
-    parser_order.push_str("\tversion = 8,\n");
-    parser_order.push_str("\tlastWidgetDetailLevel = 3,\n");
-    for key in keys {
-        parser_order.push_str(&format!(
-            "\t[\"{}\"] = 0,\n",
-            key.replace('\\', "\\\\").replace('"', "\\\"")
-        ));
-    }
-    parser_order.push_str(&format!("\t[\"{}\"] = 1,\n", WIDGET_DISPLAY_NAME));
-    parser_order.push_str("}\n");
-    fs::write(order_path, parser_order)?;
-    Ok(())
 }
 
 fn validate_local_widgets_enabled(zk_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -1538,21 +1496,60 @@ fn resolve_engine_binary(
     zk_path: &Path,
     engine_version: &str,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let candidate = zk_path
-        .join("engine")
-        .join("win64")
-        .join(engine_version)
-        .join("spring-headless.exe");
+    let engine_root = zk_path.join("engine");
+    for candidate in engine_binary_candidates(&engine_root, engine_version) {
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
 
-    if candidate.is_file() {
-        Ok(candidate)
+    Err(format!(
+        "could not find a spring-headless binary for engine version {} under {}",
+        engine_version,
+        engine_root.display()
+    )
+    .into())
+}
+
+fn engine_binary_candidates(engine_root: &Path, engine_version: &str) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let mut push_candidate = |platform_dir: &str, binary_name: &str| {
+        candidates.push(
+            engine_root
+                .join(platform_dir)
+                .join(engine_version)
+                .join(binary_name),
+        );
+    };
+
+    for (platform_dir, binary_name) in preferred_engine_locations() {
+        push_candidate(platform_dir, binary_name);
+    }
+
+    for platform_dir in ["win64", "linux64", "macos64", "osx64"] {
+        push_candidate(platform_dir, "spring-headless");
+        push_candidate(platform_dir, "spring-headless.exe");
+    }
+
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
+fn preferred_engine_locations() -> &'static [(&'static str, &'static str)] {
+    if cfg!(target_os = "windows") {
+        &[("win64", "spring-headless.exe")]
+    } else if cfg!(target_os = "linux") {
+        &[("linux64", "spring-headless"), ("linux64", "spring-headless.exe")]
+    } else if cfg!(target_os = "macos") {
+        &[
+            ("macos64", "spring-headless"),
+            ("osx64", "spring-headless"),
+            ("macos64", "spring-headless.exe"),
+            ("osx64", "spring-headless.exe"),
+        ]
     } else {
-        Err(format!(
-            "could not find spring-headless.exe for engine version {} under {}",
-            engine_version,
-            zk_path.display()
-        )
-        .into())
+        &[("win64", "spring-headless.exe")]
     }
 }
 
@@ -1654,18 +1651,11 @@ where
 
 fn cleanup_replay_artifacts(
     widget_target: &Path,
-    order_path: &Path,
-    order_backup_path: &Path,
     replay_temp_dir: &Path,
     capture_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if widget_target.exists() {
         fs::remove_file(widget_target)?;
-    }
-    if order_backup_path.exists() {
-        fs::copy(order_backup_path, order_path)?;
-    } else if order_path.exists() {
-        fs::remove_file(order_path)?;
     }
     if replay_temp_dir.exists() {
         fs::remove_dir_all(replay_temp_dir)?;
@@ -1674,4 +1664,159 @@ fn cleanup_replay_artifacts(
         fs::remove_dir_all(capture_dir)?;
     }
     Ok(())
+}
+
+fn activate_scraper_configs(
+    config_dir: &Path,
+) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    if !config_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    ensure_default_scraper_configs(config_dir)?;
+
+    let mut swapped = Vec::new();
+    for entry in fs::read_dir(config_dir)? {
+        let entry = entry?;
+        let scraper_path = entry.path();
+        let Some(file_name) = scraper_path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !file_name.ends_with(".lua.scraper") {
+            continue;
+        }
+
+        let live_name = file_name.trim_end_matches(".scraper");
+        let live_path = config_dir.join(live_name);
+        let backup_path = config_dir.join(format!("{live_name}.bak"));
+        if backup_path.exists() {
+            return Err(format!(
+                "refusing to overwrite existing backup file {}",
+                backup_path.display()
+            )
+            .into());
+        }
+        if live_path.exists() {
+            fs::rename(&live_path, &backup_path)?;
+        }
+        fs::rename(&scraper_path, &live_path)?;
+        swapped.push(live_path);
+    }
+
+    Ok(swapped)
+}
+
+fn ensure_default_scraper_configs(config_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let zk_data_path = config_dir.join("ZK_data.lua");
+    let zk_data_scraper_path = config_dir.join("ZK_data.lua.scraper");
+    if !zk_data_scraper_path.exists() {
+        let base = fs::read_to_string(&zk_data_path)?;
+        let scraper = ensure_lua_bool_setting(
+            &ensure_lua_bool_setting(&base, "useLocalWidgets", true)?,
+            "useLocalWidgetsFirst",
+            true,
+        )?;
+        fs::write(&zk_data_scraper_path, scraper)?;
+    }
+
+    let order_path = config_dir.join("ZK_order.lua");
+    let order_scraper_path = config_dir.join("ZK_order.lua.scraper");
+    if !order_scraper_path.exists() {
+        let scraper = build_parser_order_scraper(&order_path)?;
+        fs::write(&order_scraper_path, scraper)?;
+    }
+
+    Ok(())
+}
+
+fn ensure_lua_bool_setting(
+    content: &str,
+    key: &str,
+    value: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let value_text = if value { "true" } else { "false" };
+    let pattern = format!(r#"(?m)^(\s*{}\s*=\s*)(true|false)"#, regex::escape(key));
+    let re = Regex::new(&pattern)?;
+    if re.is_match(content) {
+        Ok(re
+            .replace(content, format!("${{1}}{value_text}"))
+            .into_owned())
+    } else {
+        let mut updated = content.to_string();
+        if !updated.ends_with('\n') {
+            updated.push('\n');
+        }
+        updated.push_str(&format!("{key} = {value_text}\n"));
+        Ok(updated)
+    }
+}
+
+fn build_parser_order_scraper(order_path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let existing = if order_path.is_file() {
+        fs::read_to_string(order_path)?
+    } else {
+        String::new()
+    };
+
+    let key_re = Regex::new(r#"(?m)^\s*(?:\["([^"]+)"\]|([A-Za-z0-9_]+))\s*="#)?;
+    let mut keys = Vec::new();
+    for captures in key_re.captures_iter(&existing) {
+        let key = captures
+            .get(1)
+            .or_else(|| captures.get(2))
+            .map(|m| m.as_str())
+            .unwrap_or_default();
+        if key != "version" && key != "lastWidgetDetailLevel" {
+            keys.push(key.to_string());
+        }
+    }
+    keys.sort();
+    keys.dedup();
+
+    let mut parser_order = String::from("-- Widget Order List  (0 disables a widget)\nreturn {\n");
+    parser_order.push_str("\tversion = 8,\n");
+    parser_order.push_str("\tlastWidgetDetailLevel = 3,\n");
+    for key in keys {
+        parser_order.push_str(&format!(
+            "\t[\"{}\"] = 0,\n",
+            key.replace('\\', "\\\\").replace('"', "\\\"")
+        ));
+    }
+    parser_order.push_str(&format!("\t[\"{}\"] = 1,\n", WIDGET_DISPLAY_NAME));
+    parser_order.push_str("}\n");
+    Ok(parser_order)
+}
+
+fn restore_scraper_configs(swapped: &[PathBuf]) -> Result<(), Box<dyn std::error::Error>> {
+    for live_path in swapped {
+        let Some(file_name) = live_path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let scraper_path = live_path.with_file_name(format!("{file_name}.scraper"));
+        let backup_path = live_path.with_file_name(format!("{file_name}.bak"));
+
+        if live_path.exists() {
+            fs::rename(live_path, &scraper_path)?;
+        }
+        if backup_path.exists() {
+            fs::rename(backup_path, live_path)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::engine_binary_candidates;
+
+    #[test]
+    fn engine_candidates_include_cross_platform_locations() {
+        let candidates = engine_binary_candidates(PathBuf::from("engine").as_path(), "105.0").into_iter().map(|path| path.to_string_lossy().replace('\\', "/")).collect::<Vec<_>>();
+
+        assert!(candidates.iter().any(|path| path.ends_with("win64/105.0/spring-headless.exe")));
+        assert!(candidates.iter().any(|path| path.ends_with("linux64/105.0/spring-headless")));
+        assert!(candidates.iter().any(|path| path.ends_with("macos64/105.0/spring-headless")));
+    }
 }

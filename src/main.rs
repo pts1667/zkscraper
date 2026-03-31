@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use std::error::Error;
 use std::path::PathBuf;
 use url::Url;
-use zkscraper::{fetch, gather, maps, parse};
+use zkscraper::{fetch, gather, maps, parse, pipeline};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -65,6 +65,30 @@ enum Commands {
         zk_path: PathBuf,
     },
 
+    /// Run gather, map download, replay download, and parsing as one end-to-end pipeline
+    #[command(name = "pipeline")]
+    Pipeline {
+        /// The initial offset to gather from
+        #[arg(long, default_value_t = 0)]
+        initial_offset: u32,
+
+        /// Minimum number of battle IDs to gather
+        #[arg(long, default_value_t = 100)]
+        gather_num: u32,
+
+        /// Path to Zero-K portable
+        #[arg(long)]
+        zk_path: PathBuf,
+
+        /// Output sled DB directory for parsed replays
+        #[arg(long)]
+        out: PathBuf,
+
+        /// Optional temp directory for intermediate CSV, replay, and working DB files
+        #[arg(long)]
+        temp: Option<PathBuf>,
+    },
+
     /// Parse replays and produces snapshots. Takes a long time. Final task
     #[command(name = "parse-replays")]
     ParseReplays {
@@ -75,22 +99,6 @@ enum Commands {
         /// Path to Zero-K portable
         #[arg(long)]
         zk_path: PathBuf,
-
-        /// Output sled DB directory for parsed replays
-        #[arg(long)]
-        snapshot_path: PathBuf,
-    },
-
-    /// Backfill command history from raw replays into an existing parsed replay DB
-    #[command(name = "backfill-commands")]
-    BackfillCommands {
-        /// Input directory for raw replays (.sdfz)
-        #[arg(long)]
-        sdfz_in: PathBuf,
-
-        /// Optional path to Zero-K portable, used to enrich command decoding with unit names
-        #[arg(long)]
-        zk_path: Option<PathBuf>,
 
         /// Output sled DB directory for parsed replays
         #[arg(long)]
@@ -142,6 +150,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
             })
             .await
         }
+        Commands::Pipeline {
+            initial_offset,
+            gather_num,
+            zk_path,
+            out,
+            temp,
+        } => {
+            pipeline::run_pipeline(pipeline::PipelineSettings {
+                site_url,
+                min_req_wait: args.min_req_wait,
+                initial_offset,
+                gather_num,
+                zk_path,
+                out_path: out,
+                temp_root: temp,
+            })
+            .await
+        }
         Commands::ParseReplays {
             sdfz_in,
             zk_path,
@@ -154,11 +180,5 @@ async fn main() -> Result<(), Box<dyn Error>> {
             })
             .await
         }
-        Commands::BackfillCommands {
-            sdfz_in,
-            zk_path,
-            snapshot_path,
-        } => parse::backfill_commands(sdfz_in, snapshot_path, zk_path).await,
     }
-    
 }

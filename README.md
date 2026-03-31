@@ -1,34 +1,15 @@
 # zkscraper
 
-Tools for:
-
-- gathering Zero-K battle IDs
-- downloading required maps
-- downloading replay `.sdfz` files
-- parsing replays through a local Zero-K install into a compressed `sled` DB
-- optionally backfilling command history into an existing parsed DB from raw replays only
+Scrapes zero-k.info and gathers replays into snapshots.
+Can auto-download missing maps.
 
 ## Requirements
 
-- Windows
 - Rust toolchain with `cargo`
 - network access to `https://zero-k.info`
 - a working local Zero-K portable install
 
-## Zero-K Setup
-
-`parse-replays` injects a temporary local widget into the Zero-K install and runs `spring-headless` against that install.
-
-Local widgets must be enabled in:
-
-`<zero-k install>\LuaUI\Config\ZK_data.lua`
-
-Required settings:
-
-```lua
-useLocalWidgets = true
-useLocalWidgetsFirst = true
-```
+Note: Linux/MacOS builds are untested.
 
 ## Build
 
@@ -42,18 +23,21 @@ This repo has multiple binaries:
 - `reader`: inspect parsed replay records
 - `serve-db`: serve parsed replay records over HTTP with OpenAPI docs
 
-## Full Pipeline
+## How to Use
 
-Typical end-to-end flow:
+The `pipeline` command is probably what you're looking for.
 
-1. `gather-battle-ids`
-2. `download-maps`
-3. `download-replays`
-4. `parse-replays`
+```powershell
+cargo run --release --bin zkscraper -- pipeline `
+  --initial-offset 0 `
+  --gather-num 100 `
+  --zk-path <zero-k install> `
+  --out .\target\parsed-db
+```
 
-Optional for old DBs only:
-
-5. `backfill-commands`
+Supports `--temp <dir>` to stage intermediate files somewhere else.
+If `--out` already exists, seeds the working DB from it before parsing so the pipeline updates the existing DB rather than starting from scratch.
+If a stage fails, preserves the best available parsed DB state at `<out>_fail`.
 
 ## 1. Gather Battle IDs
 
@@ -143,28 +127,9 @@ Behavior:
 Important:
 
 - required maps must already exist in `<zk_path>\maps`
-- required engine versions must already exist in `<zk_path>\engine\win64\<engine_version>`
+- required engine versions must already exist in the host OS engine directory under `<zk_path>\engine\...\<engine_version>`
 - parsing is sequential
 - do not run multiple parser processes against the same Zero-K install
-
-## 5. Backfill Commands
-
-Use this only for replay records that were parsed before command extraction was added.
-
-This does not launch Zero-K headless. It reads raw `.sdfz` files and updates existing DB entries in place.
-
-```powershell
-cargo run --release --bin zkscraper -- backfill-commands `
-  --sdfz-in .\target\replays `
-  --zk-path <zero-k install> `
-  --snapshot-path .\target\parsed-db
-```
-
-Notes:
-
-- newly parsed replays already include `command_history`
-- `--zk-path` is optional for backfill, but recommended
-- with `--zk-path`, build commands can be enriched with Zero-K unit names from the installed game archive
 
 ## Inspect Parsed Data
 
@@ -211,16 +176,21 @@ Available endpoints:
 - `GET /healthz`
 - `GET /replays?offset=0&limit=100`
 - `GET /replays/{battle_id}`
+- `GET /maps`
 - `GET /maps/{map_name}/heightmap.bmp`
 - `GET /maps/{map_name}/features`
 
 Map asset behavior:
 
 - `--zk-path` points at a Zero-K portable install and serves archives from `<zk_path>\maps`
+- `GET /maps` lists all map names found in `<zk_path>\maps`
 - heightmaps are served as `512x512` greyscale BMP images
 - map features return JSON with `metal_spots` and placed `features`
 - `.sdz` and `.sd7` map archives are supported
-- `.sd7` extraction uses `ZKSCRAPER_7Z_PATH` when set; otherwise Windows defaults to `C:\Program Files\7-Zip\7z.exe`
+- `.sd7` extraction uses `ZKSCRAPER_7Z_PATH` when set; otherwise it defaults by OS:
+  - Windows: `C:\Program Files\7-Zip\7z.exe`
+  - Linux: `7z`
+  - macOS: `7zz`
 - replay JSON caching is disabled by default; set `ZKSCRAPER_REPLAY_JSON_CACHE_SIZE` to a small positive integer to enable an LRU cache by replay count
 
 ## Stored Replay Structure
@@ -325,8 +295,8 @@ Unknown custom command IDs are still preserved as raw command records.
 
 - `parse-replays` stores successful replays even if later replays fail
 - rerunning parse will skip already-stored battle IDs
-- `backfill-commands` updates existing records in place
 - the parser uses watchdog logic around `spring-headless` to kill stuck or broken runs
+- `pipeline` keeps partial parsed DB output at `<out>_fail` when a stage fails
 
 ## Troubleshooting
 
@@ -334,7 +304,7 @@ If `parse-replays` fails immediately:
 
 - confirm local widgets are enabled in `ZK_data.lua`
 - confirm the required map exists in `<zk_path>\maps`
-- confirm the required engine exists in `<zk_path>\engine\win64\<engine_version>`
+- confirm the required engine exists under `<zk_path>\engine` for your host OS and replay engine version
 
 If `spring-headless` exits on a replay:
 
@@ -346,6 +316,12 @@ If `download-maps` reports failures:
 
 - regenerate the battle CSV with the current `gather-battle-ids`
 - then rerun `download-maps`
+
+If `pipeline` fails:
+
+- inspect the preserved DB at `<out>_fail` if it was created
+- rerun the exact command printed by `pipeline`
+- on a parse-stage failure, use the printed `parse-replays` command with `--snapshot-path <out>_fail` to continue from the preserved partial DB
 
 If you want to inspect stored replay records directly:
 

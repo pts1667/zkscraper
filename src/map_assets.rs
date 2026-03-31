@@ -67,6 +67,11 @@ pub struct MapFeaturesResponse {
     pub features: Vec<MapFeature>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct MapListResponse {
+    pub items: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 enum ArchiveKind {
     Zip(PathBuf),
@@ -158,6 +163,42 @@ impl MapService {
         Ok(response)
     }
 
+    pub fn list_maps(&self) -> Result<MapListResponse, MapAssetError> {
+        let mut map_names = Vec::new();
+
+        for entry in fs::read_dir(&self.maps_dir).map_err(|err| MapAssetError::new(err.to_string()))? {
+            let entry = entry.map_err(|err| MapAssetError::new(err.to_string()))?;
+            let path = entry.path();
+            let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
+                continue;
+            };
+            if !extension.eq_ignore_ascii_case("sd7") && !extension.eq_ignore_ascii_case("sdz") {
+                continue;
+            }
+
+            let archive = archive_kind(path)?;
+            let entries = self.list_archive_entries_display(&archive)?;
+            let mut added_from_archive = false;
+            for map_name in entries
+                .into_iter()
+                .filter_map(|name| archive_map_stem_display(&name))
+            {
+                map_names.push(display_map_name(&map_name));
+                added_from_archive = true;
+            }
+
+            if !added_from_archive {
+                if let Some(stem) = archive_path_stem(&archive) {
+                    map_names.push(display_map_name(&stem));
+                }
+            }
+        }
+
+        map_names.sort_unstable_by_key(|name| normalize_map_key(name));
+        map_names.dedup_by(|left, right| normalize_map_key(left) == normalize_map_key(right));
+        Ok(MapListResponse { items: map_names })
+    }
+
     fn resolve_archive(&self, map_name: &str) -> Result<ArchiveKind, MapAssetError> {
         let requested = normalize_map_key(map_name);
         let mut exact_matches = Vec::new();
@@ -231,6 +272,35 @@ impl MapService {
                     Err(_) => list_archive_entries_with_7z(path),
                 }
             }
+        }
+    }
+
+    fn list_archive_entries_display(
+        &self,
+        archive: &ArchiveKind,
+    ) -> Result<Vec<String>, MapAssetError> {
+        match archive {
+            ArchiveKind::Zip(path) => {
+                let file = fs::File::open(path).map_err(|err| MapAssetError::new(err.to_string()))?;
+                let mut archive =
+                    ZipArchive::new(file).map_err(|err| MapAssetError::new(err.to_string()))?;
+                let mut names = Vec::with_capacity(archive.len());
+                for index in 0..archive.len() {
+                    let entry = archive
+                        .by_index(index)
+                        .map_err(|err| MapAssetError::new(err.to_string()))?;
+                    names.push(entry.name().replace('\\', "/"));
+                }
+                Ok(names)
+            }
+            ArchiveKind::SevenZip(path) => match Archive::open(path) {
+                Ok(archive) => Ok(archive
+                    .files
+                    .iter()
+                    .map(|entry| entry.name().replace('\\', "/"))
+                    .collect()),
+                Err(_) => list_archive_entries_with_7z(path),
+            },
         }
     }
 
@@ -351,6 +421,15 @@ fn archive_kind(path: PathBuf) -> Result<ArchiveKind, MapAssetError> {
     }
 }
 
+fn archive_path_stem(archive: &ArchiveKind) -> Option<String> {
+    let path = match archive {
+        ArchiveKind::Zip(path) | ArchiveKind::SevenZip(path) => path,
+    };
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(|stem| stem.to_string())
+}
+
 fn normalize_archive_path(path: &str) -> String {
     path.replace('\\', "/").to_ascii_lowercase()
 }
@@ -362,12 +441,29 @@ fn archive_map_stem(path: &str) -> Option<String> {
     Some(stem.to_string())
 }
 
+fn archive_map_stem_display(path: &str) -> Option<String> {
+    let normalized = path.replace('\\', "/");
+    let prefix_len = normalized
+        .get(..5)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("maps/"))
+        .map(str::len)?;
+    let relative = &normalized[prefix_len..];
+    if relative.len() < 4 || !relative[relative.len() - 4..].eq_ignore_ascii_case(".smf") {
+        return None;
+    }
+    Some(relative[..relative.len() - 4].to_string())
+}
+
 fn normalize_map_key(value: &str) -> String {
     value
         .chars()
         .filter(|ch| ch.is_ascii_alphanumeric())
         .flat_map(|ch| ch.to_lowercase())
         .collect()
+}
+
+fn display_map_name(value: &str) -> String {
+    value.replace('_', " ")
 }
 
 fn parse_smf_heightmap(bytes: &[u8]) -> Result<(u32, u32, Vec<u16>), MapAssetError> {
@@ -573,7 +669,7 @@ fn list_archive_entries_with_7z(path: &Path) -> Result<Vec<String>, MapAssetErro
     Ok(String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| line.strip_prefix("Path = "))
-        .map(normalize_archive_path)
+        .map(|entry| entry.replace('\\', "/"))
         .filter(|entry| !entry.is_empty() && !entry.ends_with('/'))
         .collect())
 }
@@ -600,9 +696,19 @@ fn read_sevenz_file_with_7z(path: &Path, requested: &str) -> Result<Vec<u8>, Map
 fn resolve_7z_path() -> &'static str {
     Box::leak(
         env::var("ZKSCRAPER_7Z_PATH")
-            .unwrap_or_else(|_| "C:\\Program Files\\7-Zip\\7z.exe".to_string())
+            .unwrap_or_else(|_| default_7z_path().to_string())
             .into_boxed_str(),
     )
+}
+
+fn default_7z_path() -> &'static str {
+    if cfg!(target_os = "windows") {
+        r"C:\Program Files\7-Zip\7z.exe"
+    } else if cfg!(target_os = "macos") {
+        "7zz"
+    } else {
+        "7z"
+    }
 }
 
 #[cfg(test)]
@@ -707,6 +813,28 @@ mod tests {
         let service = MapService::from_zk_path(temp_dir.path())?;
         let bmp = service.heightmap_bmp("duke nukem 4.2")?;
         assert!(bmp.starts_with(b"BM"));
+        Ok(())
+    }
+
+    #[test]
+    fn lists_available_maps_from_archives(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let temp_dir = tempfile::tempdir()?;
+        write_test_archive(temp_dir.path())?;
+
+        let maps_dir = temp_dir.path().join("maps");
+        let archive_path = maps_dir.join("duke_nukem_4.2.sdz");
+        let file = fs::File::create(&archive_path)?;
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        writer.start_file("maps/duke_nukem_4.2.smf", options)?;
+        writer.write_all(&sample_smf())?;
+        writer.finish()?;
+
+        let service = MapService::from_zk_path(temp_dir.path())?;
+        let maps = service.list_maps()?;
+        assert!(maps.items.iter().any(|name| name == "TestMap"));
+        assert!(maps.items.iter().any(|name| name == "duke nukem 4.2"));
         Ok(())
     }
 }
