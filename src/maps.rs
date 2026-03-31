@@ -7,9 +7,10 @@ use std::{
 use indicatif::ProgressBar;
 use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
 use regex::Regex;
-use reqwest::Client;
-use tokio::{fs::File, io::AsyncWriteExt, time};
+use tokio::{fs::File, io::AsyncWriteExt};
 use url::Url;
+
+use crate::http::RateLimitedHttpClient;
 
 pub struct DownloadMapsSettings {
     pub site_url: Url,
@@ -118,11 +119,15 @@ fn parse_unique_maps(
 
 async fn resolve_map_download_url_from_battle(
     battle_id: u64,
-    client: &Client,
+    client: &RateLimitedHttpClient,
     site_url: &Url,
 ) -> Result<Option<Url>, Box<dyn std::error::Error>> {
     let battle_url = site_url.join("Battles/Detail/")?.join(&battle_id.to_string())?;
-    let battle_html = client.get(battle_url).send().await?.text().await?;
+    let battle_html = client
+        .send(client.raw().get(battle_url))
+        .await?
+        .text()
+        .await?;
 
     let map_detail_re = Regex::new(r#"<a href="(?P<path>/Maps/Detail/\d+)""#)?;
     let Some(map_detail_match) = map_detail_re.captures(&battle_html) else {
@@ -130,7 +135,11 @@ async fn resolve_map_download_url_from_battle(
     };
     let map_detail_url = site_url.join(map_detail_match.name("path").unwrap().as_str())?;
 
-    let map_html = client.get(map_detail_url).send().await?.text().await?;
+    let map_html = client
+        .send(client.raw().get(map_detail_url))
+        .await?
+        .text()
+        .await?;
     let map_download_re =
         Regex::new(r#"(https?://zero-k\.info/content/(?:maps|games)/[^"']+\.sd[7z]|//zero-k\.info/content/(?:maps|games)/[^"']+\.sd[7z])"#)?;
     let Some(download_match) = map_download_re.find(&map_html) else {
@@ -149,14 +158,14 @@ async fn download_map(
     map_file_base: &str,
     map_extension: &str,
     battle_id: u64,
-    client: &Client,
+    client: &RateLimitedHttpClient,
     site_url: &Url,
     maps_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let file_name = format!("{map_file_base}.{map_extension}");
     let encoded_file_name = encode_map_filename(&file_name);
     let download_url = site_url.join(&format!("content/maps/{encoded_file_name}"))?;
-    let response = client.get(download_url).send().await?;
+    let response = client.send(client.raw().get(download_url)).await?;
     if response.status().is_success() {
         let size_label = response
             .content_length()
@@ -173,7 +182,7 @@ async fn download_map(
     }
 
     if let Some(download_url) = resolve_map_download_url_from_battle(battle_id, client, site_url).await? {
-        let response = client.get(download_url).send().await?;
+        let response = client.send(client.raw().get(download_url)).await?;
         if response.status().is_success() {
             let size_label = response
                 .content_length()
@@ -201,9 +210,7 @@ pub async fn download_maps(
 
     let maps = parse_unique_maps(&settings.csv_path)?;
 
-    let client = Client::new();
-    let mut timer = time::interval(Duration::from_millis(settings.min_req_wait as u64));
-    timer.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+    let client = RateLimitedHttpClient::new(Duration::from_millis(settings.min_req_wait as u64));
 
     let pb = ProgressBar::new(maps.len() as u64);
     let mut failures = Vec::new();
@@ -238,7 +245,6 @@ pub async fn download_maps(
             failures.push(map_file_base);
         }
         pb.inc(1);
-        timer.tick().await;
     }
 
     if failures.is_empty() {

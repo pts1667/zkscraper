@@ -5,8 +5,10 @@ use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
-use tokio::time::{self, Duration};
+use tokio::time::Duration;
 use url::Url;
+
+use crate::http::RateLimitedHttpClient;
 
 pub struct GatherFilterSettings {
     pub title: Option<String>,
@@ -181,11 +183,9 @@ pub async fn gather_battle_ids(
     let map_download_re =
         Regex::new(r#"(https?://zero-k\.info/content/(?:maps|games)/(?P<filename>[^"']+\.(?:sd7|sdz))|//zero-k\.info/content/(?:maps|games)/(?P<filename_scheme_relative>[^"']+\.(?:sd7|sdz)))"#)?;
 
-    let http_client = reqwest::Client::new();
+    let http_client = RateLimitedHttpClient::new(Duration::from_millis(settings.min_req_wait as u64));
     let local_maps = load_local_map_archives(settings.zk_path.as_deref())?;
     let mut wtr = csv::Writer::from_path(settings.out_path)?;
-    let mut timer = time::interval(Duration::from_millis(settings.min_req_wait as u64));
-    timer.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
 
     wtr.write_record(["Battle ID", "Version", "Map File", "Map Extension"])?;
 
@@ -199,9 +199,9 @@ pub async fn gather_battle_ids(
         req_form.insert("offset", offset.to_string());
 
         let body = http_client
-            .post(req_url.clone())
+            .send(http_client.raw().post(req_url.clone())
             .form(&req_form)
-            .send()
+            )
             .await?
             .bytes()
             .await?
@@ -246,7 +246,11 @@ pub async fn gather_battle_ids(
                         .site_url
                         .join("Battles/Detail/")?
                         .join(&battle_id)?;
-                    let battle_html = http_client.get(battle_url).send().await?.text().await?;
+                    let battle_html = http_client
+                        .send(http_client.raw().get(battle_url))
+                        .await?
+                        .text()
+                        .await?;
 
                     let map_detail_path = map_detail_re
                         .captures(&battle_html)
@@ -258,10 +262,12 @@ pub async fn gather_battle_ids(
                             )
                         })?;
 
-                    timer.tick().await;
-
                     let map_detail_url = settings.site_url.join(&map_detail_path)?;
-                    let map_html = http_client.get(map_detail_url).send().await?.text().await?;
+                    let map_html = http_client
+                        .send(http_client.raw().get(map_detail_url))
+                        .await?
+                        .text()
+                        .await?;
 
                     let captures = map_download_re.captures(&map_html).ok_or_else(|| {
                         format!("could not resolve map archive while gathering battle {}", battle_id)
@@ -300,7 +306,6 @@ pub async fn gather_battle_ids(
         }
 
         offset += 40;
-        timer.tick().await;
     }
 
     wtr.flush()?;

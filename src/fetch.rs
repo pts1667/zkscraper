@@ -8,9 +8,10 @@ use std::{
 
 use indicatif::ProgressBar;
 use regex::Regex;
-use reqwest::Client;
-use tokio::{fs::File, io::AsyncWriteExt, time};
+use tokio::{fs::File, io::AsyncWriteExt};
 use url::Url;
+
+use crate::http::RateLimitedHttpClient;
 
 pub struct FetchReplaySettings {
     pub site_url: Url,
@@ -102,7 +103,7 @@ fn write_manifest(
 
 pub async fn fetch_replay(
     battle_id: u64,
-    client: &Client,
+    client: &RateLimitedHttpClient,
     settings: &FetchReplaySettings,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let req_url_end = "Battles/Detail/";
@@ -114,7 +115,12 @@ pub async fn fetch_replay(
 
     let re_name = Regex::new(r"<a href=\'\/replays\/(.+?)[.]sdfz")?;
 
-    let body = client.get(req_url).send().await?.bytes().await?.to_vec();
+    let body = client
+        .send(client.raw().get(req_url))
+        .await?
+        .bytes()
+        .await?
+        .to_vec();
 
     let body_s = String::from_utf8(body)?;
     let replay_name = if let Some(cap) = re_name.captures(&body_s) {
@@ -129,7 +135,11 @@ pub async fn fetch_replay(
     let replay_path = settings.out_path.join(replay_name);
     // we don't really handle corrupted downloads etc. Shouldn't be necessary
     if !replay_path.is_file() {
-        let dl = client.get(replay_dl_url).send().await?.bytes().await?;
+        let dl = client
+            .send(client.raw().get(replay_dl_url))
+            .await?
+            .bytes()
+            .await?;
 
         let mut out_file = File::create(replay_path.clone()).await?;
         out_file.write_all(&dl).await?;
@@ -158,12 +168,9 @@ pub async fn fetch_replays(
         })
         .collect();
 
-    let mut timer = time::interval(Duration::from_millis(settings.min_req_wait as u64));
-    timer.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
-
     let manifest_path = settings.out_path.join(MANIFEST_FILENAME);
     let mut manifest_entries = read_manifest(&manifest_path)?;
-    let client = Client::new();
+    let client = RateLimitedHttpClient::new(Duration::from_millis(settings.min_req_wait as u64));
     let pb = ProgressBar::new(battle_rows.len() as u64);
     for (battle_id, game_version) in battle_rows {
         let replay_filename = fetch_replay(battle_id, &client, &settings).await?;
@@ -175,7 +182,6 @@ pub async fn fetch_replays(
                 game_version,
             },
         );
-        timer.tick().await;
         pb.inc(1);
     }
 
