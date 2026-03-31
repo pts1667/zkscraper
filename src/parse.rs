@@ -4,6 +4,10 @@ use std::{
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::Stdio,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 use fastapi::ToSchema;
@@ -13,7 +17,6 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tokio::{
     process::{Child, Command},
-    signal,
     time::{sleep, Duration, Instant},
 };
 
@@ -276,6 +279,13 @@ pub async fn parse_replays(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config_dir = settings.zk_path.join("LuaUI").join("Config");
     let swapped_configs = activate_scraper_configs(&config_dir)?;
+    let interrupted = Arc::new(AtomicBool::new(false));
+    let interrupted_signal = interrupted.clone();
+    let signal_task = tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            interrupted_signal.store(true, Ordering::SeqCst);
+        }
+    });
 
     let parse_future = async {
         validate_local_widgets_enabled(&settings.zk_path)?;
@@ -300,6 +310,10 @@ pub async fn parse_replays(
         let pb = ProgressBar::new(manifest.len() as u64);
         let mut failures = Vec::new();
         for entry in manifest {
+            if interrupted.load(Ordering::SeqCst) {
+                return Err("parse interrupted by Ctrl+C".into());
+            }
+
             let key = entry.battle_id.to_string();
             if db.contains_key(key.as_bytes())? {
                 pb.inc(1);
@@ -344,6 +358,7 @@ pub async fn parse_replays(
                     &settings.zk_path,
                     &replay_path,
                     entry.battle_id,
+                    interrupted.clone(),
                 )
                 .await;
 
@@ -408,15 +423,8 @@ pub async fn parse_replays(
         }
     };
 
-    let parse_result: Result<(), Box<dyn std::error::Error>> = tokio::select! {
-        result = parse_future => result,
-        signal_result = signal::ctrl_c() => {
-            match signal_result {
-                Ok(()) => Err("parse interrupted by Ctrl+C".into()),
-                Err(err) => Err(format!("failed to listen for Ctrl+C: {err}").into()),
-            }
-        }
-    };
+    let parse_result: Result<(), Box<dyn std::error::Error>> = parse_future.await;
+    signal_task.abort();
 
     let restore_result = restore_scraper_configs(&swapped_configs);
     match (parse_result, restore_result) {
@@ -510,6 +518,7 @@ async fn run_single_replay(
     zk_path: &Path,
     replay_path: &Path,
     battle_id: u64,
+    interrupted: Arc<AtomicBool>,
 ) -> Result<
     (
         WidgetMeta,
@@ -520,6 +529,10 @@ async fn run_single_replay(
     ),
     Box<dyn std::error::Error>,
 > {
+    if interrupted.load(Ordering::SeqCst) {
+        return Err("parse interrupted by Ctrl+C".into());
+    }
+
     install_widget(widget_source, widget_target)?;
     let absolute_zk_path = absolute_path(zk_path)?;
     let absolute_config_path = absolute_path(config_path)?;
@@ -555,6 +568,7 @@ async fn run_single_replay(
         log_offset,
         capture_dir,
         battle_id,
+        &interrupted,
     )
     .await?;
     if !status.success() {
@@ -620,6 +634,7 @@ async fn wait_for_headless(
     log_offset: u64,
     capture_dir: &Path,
     battle_id: u64,
+    interrupted: &AtomicBool,
 ) -> Result<std::process::ExitStatus, Box<dyn std::error::Error>> {
     let started_at = Instant::now();
     let mut last_progress = Instant::now();
@@ -631,6 +646,11 @@ async fn wait_for_headless(
     let mut capture_bytes = capture_size(capture_dir);
 
     loop {
+        if interrupted.load(Ordering::SeqCst) {
+            kill_child(child).await?;
+            return Err("parse interrupted by Ctrl+C".into());
+        }
+
         if let Some(status) = child.try_wait()? {
             return Ok(status);
         }

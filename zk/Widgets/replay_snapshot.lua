@@ -327,8 +327,11 @@ local function quitReplay()
 	spSendCommands("quitforce")
 end
 
-local function forceReplaySpeed()
+local function unpauseReplay()
 	spSendCommands("pause 0")
+end
+
+local function forceReplaySpeed()
 	spSendCommands("setminspeed " .. replaySpeed)
 	spSendCommands("setmaxspeed " .. replaySpeed)
 end
@@ -352,6 +355,9 @@ function widget:Initialize()
 		spEcho("<ZKScraper> No configured output directory. Widget removed.")
 		widgetHandler:RemoveWidget()
 		return
+	end
+	if widgetHandler and widgetHandler.knownWidgets and widgetHandler.knownWidgets["Replay control buttons"] then
+		widgetHandler:DisableWidget("Replay control buttons")
 	end
 	Spring.CreateDir(captureDir)
 	local gaiaAllyTeamID = select(6, spGetTeamInfo(spGetGaiaTeamID(), false))
@@ -411,6 +417,7 @@ function widget:Initialize()
 
 	spSendCommands("forcestart")
 	spSendCommands("skip 0")
+	unpauseReplay()
 	forceReplaySpeed()
 end
 
@@ -419,7 +426,7 @@ function widget:Shutdown()
 end
 
 function widget:GameFrame(frame)
-	if frame % 30 == 0 then
+	if frame % 300 == 0 then
 		forceReplaySpeed()
 	end
 	if frame % snapshotFrames == 0 then
@@ -435,6 +442,7 @@ function widget:AddConsoleMessage(msg)
 	end
 	if msg and msg.text == "Beginning demo playback" then
 		replayStarted = true
+		unpauseReplay()
 		forceReplaySpeed()
 	end
 end
