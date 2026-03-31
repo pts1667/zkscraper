@@ -541,6 +541,7 @@ mod tests {
                 }],
             ))
             .collect(),
+            economy_snapshots: std::collections::BTreeMap::new(),
             command_history: vec![CommandRecord {
                 frame: first_frame,
                 game_seconds: 5.0,

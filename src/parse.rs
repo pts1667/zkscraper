@@ -70,6 +70,8 @@ pub struct ParsedReplay {
     pub map_size: Option<MapSize>,
     pub global_snapshots: Vec<SnapshotRecord>,
     pub allyteam_snapshots: BTreeMap<u32, Vec<AllyTeamSnapshotRecord>>,
+    #[serde(default, alias = "player_snapshots")]
+    pub economy_snapshots: BTreeMap<u32, Vec<EconomySnapshotRecord>>,
     pub command_history: Vec<CommandRecord>,
     pub events: Vec<EventRecord>,
     pub springie_stats: Vec<String>,
@@ -121,6 +123,35 @@ pub struct AllyTeamSnapshotRecord {
     pub game_seconds: f32,
     pub los_units: Vec<UnitSnapshot>,
     pub radar_contacts: Vec<RadarContact>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct EconomySnapshotRecord {
+    pub team_id: i32,
+    pub allyteam_id: i32,
+    pub frame: u32,
+    pub game_seconds: f32,
+    pub economy: EconomySnapshot,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct EconomySnapshot {
+    pub metal_income: f32,
+    pub energy_income: f32,
+    pub metal_stored: f32,
+    pub energy_stored: f32,
+    pub metal_storage: f32,
+    pub energy_storage: f32,
+    pub metal_pull: f32,
+    pub energy_pull: f32,
+    pub metal_expense: f32,
+    pub energy_expense: f32,
+    pub metal_share: f32,
+    pub energy_share: f32,
+    pub metal_sent: f32,
+    pub energy_sent: f32,
+    pub metal_received: f32,
+    pub energy_received: f32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
@@ -317,7 +348,14 @@ pub async fn parse_replays(
 
                 let cleanup_result =
                     cleanup_replay_artifacts(&widget_target, &replay_temp_dir, &capture_dir);
-                let (widget_meta, global_snapshots, allyteam_snapshots, events) = replay_result?;
+                let (
+                    widget_meta,
+                    global_snapshots,
+                    allyteam_snapshots,
+                    economy_snapshots,
+                    events,
+                ) =
+                    replay_result?;
                 cleanup_result?;
 
                 let parsed = ParsedReplay {
@@ -333,6 +371,7 @@ pub async fn parse_replays(
                     map_size: Some(widget_meta.map_size),
                     global_snapshots,
                     allyteam_snapshots,
+                    economy_snapshots,
                     command_history: dem_info.command_history,
                     events,
                     springie_stats: dem_info.springie_stats,
@@ -466,6 +505,7 @@ async fn run_single_replay(
         WidgetMeta,
         Vec<SnapshotRecord>,
         BTreeMap<u32, Vec<AllyTeamSnapshotRecord>>,
+        BTreeMap<u32, Vec<EconomySnapshotRecord>>,
         Vec<EventRecord>,
     ),
     Box<dyn std::error::Error>,
@@ -519,11 +559,13 @@ async fn run_single_replay(
     let meta_path = capture_dir.join("meta.json");
     let global_snapshots_path = capture_dir.join("global_snapshots.jsonl");
     let allyteam_snapshots_path = capture_dir.join("allyteam_snapshots.jsonl");
+    let economy_snapshots_path = capture_dir.join("economy_snapshots.jsonl");
     let events_path = capture_dir.join("events.jsonl");
 
     if !meta_path.is_file()
         || !global_snapshots_path.is_file()
         || !allyteam_snapshots_path.is_file()
+        || !economy_snapshots_path.is_file()
         || !events_path.is_file()
     {
         return Err(format!(
@@ -536,6 +578,7 @@ async fn run_single_replay(
     let widget_meta: WidgetMeta = serde_json::from_slice(&fs::read(&meta_path)?)?;
     let global_snapshots = read_jsonl::<SnapshotRecord>(&global_snapshots_path)?;
     let allyteam_snapshot_rows = read_jsonl::<AllyTeamSnapshotRecord>(&allyteam_snapshots_path)?;
+    let economy_snapshot_rows = read_jsonl::<EconomySnapshotRecord>(&economy_snapshots_path)?;
     let events = read_jsonl::<EventRecord>(&events_path)?;
     let mut allyteam_snapshots: BTreeMap<u32, Vec<AllyTeamSnapshotRecord>> = BTreeMap::new();
     for snapshot in allyteam_snapshot_rows {
@@ -544,8 +587,21 @@ async fn run_single_replay(
             .or_default()
             .push(snapshot);
     }
+    let mut economy_snapshots: BTreeMap<u32, Vec<EconomySnapshotRecord>> = BTreeMap::new();
+    for snapshot in economy_snapshot_rows {
+        economy_snapshots
+            .entry(snapshot.team_id as u32)
+            .or_default()
+            .push(snapshot);
+    }
 
-    Ok((widget_meta, global_snapshots, allyteam_snapshots, events))
+    Ok((
+        widget_meta,
+        global_snapshots,
+        allyteam_snapshots,
+        economy_snapshots,
+        events,
+    ))
 }
 
 async fn wait_for_headless(
@@ -686,6 +742,7 @@ fn capture_size(capture_dir: &Path) -> u64 {
         "meta.json",
         "global_snapshots.jsonl",
         "allyteam_snapshots.jsonl",
+        "economy_snapshots.jsonl",
         "events.jsonl",
     ]
         .into_iter()
@@ -1809,7 +1866,7 @@ fn restore_scraper_configs(swapped: &[PathBuf]) -> Result<(), Box<dyn std::error
 mod tests {
     use std::path::PathBuf;
 
-    use super::engine_binary_candidates;
+    use super::{engine_binary_candidates, ParsedReplay};
 
     #[test]
     fn engine_candidates_include_cross_platform_locations() {
@@ -1818,5 +1875,58 @@ mod tests {
         assert!(candidates.iter().any(|path| path.ends_with("win64/105.0/spring-headless.exe")));
         assert!(candidates.iter().any(|path| path.ends_with("linux64/105.0/spring-headless")));
         assert!(candidates.iter().any(|path| path.ends_with("macos64/105.0/spring-headless")));
+    }
+
+    #[test]
+    fn parsed_replay_defaults_missing_economy_snapshots() {
+        let replay = serde_json::from_str::<ParsedReplay>(
+            r#"{
+                "battle_id": 1,
+                "replay_filename": "test.sdfz",
+                "game_version": "1",
+                "engine_version": "105",
+                "map_name": null,
+                "game_name": null,
+                "zksearchtag": null,
+                "players": [],
+                "teams": [],
+                "map_size": null,
+                "global_snapshots": [],
+                "allyteam_snapshots": {},
+                "command_history": [],
+                "events": [],
+                "springie_stats": []
+            }"#,
+        )
+        .unwrap();
+
+        assert!(replay.economy_snapshots.is_empty());
+    }
+
+    #[test]
+    fn parsed_replay_accepts_legacy_player_snapshots_field() {
+        let replay = serde_json::from_str::<ParsedReplay>(
+            r#"{
+                "battle_id": 1,
+                "replay_filename": "test.sdfz",
+                "game_version": "1",
+                "engine_version": "105",
+                "map_name": null,
+                "game_name": null,
+                "zksearchtag": null,
+                "players": [],
+                "teams": [],
+                "map_size": null,
+                "global_snapshots": [],
+                "allyteam_snapshots": {},
+                "player_snapshots": {},
+                "command_history": [],
+                "events": [],
+                "springie_stats": []
+            }"#,
+        )
+        .unwrap();
+
+        assert!(replay.economy_snapshots.is_empty());
     }
 }

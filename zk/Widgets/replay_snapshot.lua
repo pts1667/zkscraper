@@ -22,6 +22,7 @@ local spGetPlayerInfo = Spring.GetPlayerInfo
 local spGetPlayerList = Spring.GetPlayerList
 local spGetTeamInfo = Spring.GetTeamInfo
 local spGetTeamList = Spring.GetTeamList
+local spGetTeamResources = Spring.GetTeamResources
 local spGetUnitDefID = Spring.GetUnitDefID
 local spGetUnitExperience = Spring.GetUnitExperience
 local spGetUnitHealth = Spring.GetUnitHealth
@@ -35,6 +36,7 @@ local spSendCommands = Spring.SendCommands
 local metaFile
 local globalSnapshotFile
 local allyTeamSnapshotFile
+local economySnapshotFile
 local eventFile
 local captureDir
 local snapshotFrames = 120
@@ -106,6 +108,11 @@ local function closeFiles()
 		allyTeamSnapshotFile:flush()
 		allyTeamSnapshotFile:close()
 		allyTeamSnapshotFile = nil
+	end
+	if economySnapshotFile then
+		economySnapshotFile:flush()
+		economySnapshotFile:close()
+		economySnapshotFile = nil
 	end
 	if eventFile then
 		eventFile:flush()
@@ -241,6 +248,50 @@ local function writeAllyTeamSnapshots(frame)
 	end
 end
 
+local function economyJsonForTeam(teamID)
+	local metalCurrent, metalStorage, metalPull, metalIncome, metalExpense, metalShare, metalSent, metalReceived =
+		spGetTeamResources(teamID, "metal")
+	local energyCurrent, energyStorage, energyPull, energyIncome, energyExpense, energyShare, energySent, energyReceived =
+		spGetTeamResources(teamID, "energy")
+
+	return objectToJson({
+		"\"metal_income\":" .. jsonNumber(metalIncome or 0),
+		"\"energy_income\":" .. jsonNumber(energyIncome or 0),
+		"\"metal_stored\":" .. jsonNumber(metalCurrent or 0),
+		"\"energy_stored\":" .. jsonNumber(energyCurrent or 0),
+		"\"metal_storage\":" .. jsonNumber(metalStorage or 0),
+		"\"energy_storage\":" .. jsonNumber(energyStorage or 0),
+		"\"metal_pull\":" .. jsonNumber(metalPull or 0),
+		"\"energy_pull\":" .. jsonNumber(energyPull or 0),
+		"\"metal_expense\":" .. jsonNumber(metalExpense or 0),
+		"\"energy_expense\":" .. jsonNumber(energyExpense or 0),
+		"\"metal_share\":" .. jsonNumber(metalShare or 0),
+		"\"energy_share\":" .. jsonNumber(energyShare or 0),
+		"\"metal_sent\":" .. jsonNumber(metalSent or 0),
+		"\"energy_sent\":" .. jsonNumber(energySent or 0),
+		"\"metal_received\":" .. jsonNumber(metalReceived or 0),
+		"\"energy_received\":" .. jsonNumber(energyReceived or 0),
+	})
+end
+
+local function writeEconomySnapshots(frame)
+	local seenTeams = {}
+	for _, playerID in ipairs(spGetPlayerList()) do
+		local _, active, spectator, teamID = spGetPlayerInfo(playerID, false)
+		if not spectator and teamID and teamID >= 0 and not seenTeams[teamID] then
+			seenTeams[teamID] = true
+			local allyTeamID = select(6, spGetTeamInfo(teamID, false)) or -1
+			writeLine(economySnapshotFile, objectToJson({
+				"\"team_id\":" .. jsonNumber(teamID),
+				"\"allyteam_id\":" .. jsonNumber(allyTeamID),
+				"\"frame\":" .. jsonNumber(frame),
+				"\"game_seconds\":" .. jsonNumber(getGameSeconds(frame)),
+				"\"economy\":" .. economyJsonForTeam(teamID),
+			}))
+		end
+	end
+end
+
 local function writeEvent(eventType, frame, payloadJson)
 	payloadJson = payloadJson or "{}"
 	writeLine(eventFile, objectToJson({
@@ -333,6 +384,14 @@ function widget:Initialize()
 		return
 	end
 
+	economySnapshotFile, err = io.open(captureDir .. "/economy_snapshots.jsonl", "w+")
+	if not economySnapshotFile then
+		spEcho("<ZKScraper> Failed to open economy snapshot file: " .. tostring(err))
+		closeFiles()
+		widgetHandler:RemoveWidget()
+		return
+	end
+
 	eventFile, err = io.open(captureDir .. "/events.jsonl", "w+")
 	if not eventFile then
 		spEcho("<ZKScraper> Failed to open event file: " .. tostring(err))
@@ -360,6 +419,7 @@ function widget:GameFrame(frame)
 	if frame % snapshotFrames == 0 then
 		writeSnapshot(frame)
 		writeAllyTeamSnapshots(frame)
+		writeEconomySnapshots(frame)
 	end
 end
 
