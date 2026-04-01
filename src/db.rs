@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fmt,
     num::NonZeroUsize,
     path::Path,
@@ -7,7 +8,6 @@ use std::{
 
 use fastapi::ToSchema;
 use lru::LruCache;
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::parse::ParsedReplay;
@@ -33,7 +33,7 @@ impl std::error::Error for ReplayDbError {}
 pub struct ReplayDb {
     db: sled::Db,
     battle_ids: Arc<Vec<u64>>,
-    summaries: Arc<Vec<ReplaySummary>>,
+    summaries: Arc<Mutex<HashMap<u64, ReplaySummary>>>,
     replay_json_cache: Option<Arc<Mutex<LruCache<u64, Arc<serde_json::Value>>>>>,
 }
 
@@ -69,32 +69,22 @@ pub struct ReplayListResponse {
 impl ReplayDb {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ReplayDbError> {
         let db = sled::open(path).map_err(|err| ReplayDbError::new(err.to_string()))?;
-        let mut entries = Vec::with_capacity(db.len());
+        let mut battle_ids = Vec::with_capacity(db.len());
         for entry in db.iter() {
-            let (key, value) = entry.map_err(|err| ReplayDbError::new(err.to_string()))?;
-            entries.push((key.to_vec(), value.to_vec()));
+            let (key, _) = entry.map_err(|err| ReplayDbError::new(err.to_string()))?;
+            let key = std::str::from_utf8(key.as_ref())
+                .map_err(|err| ReplayDbError::new(err.to_string()))?;
+            let battle_id = key.parse::<u64>().map_err(|err| {
+                ReplayDbError::new(format!("invalid battle id key '{key}': {err}"))
+            })?;
+            battle_ids.push(battle_id);
         }
-
-        let mut indexed = entries
-            .into_par_iter()
-            .map(|(key, value)| {
-                let key = std::str::from_utf8(key.as_ref())
-                    .map_err(|err| ReplayDbError::new(err.to_string()))?;
-                let battle_id = key.parse::<u64>().map_err(|err| {
-                    ReplayDbError::new(format!("invalid battle id key '{key}': {err}"))
-                })?;
-                let summary = decode_replay_summary(value.as_ref())?;
-                Ok((battle_id, summary))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        indexed.sort_unstable_by_key(|(battle_id, _)| *battle_id);
-        let battle_ids = indexed.iter().map(|(battle_id, _)| *battle_id).collect();
-        let summaries = indexed.into_iter().map(|(_, summary)| summary).collect();
+        battle_ids.sort_unstable();
 
         Ok(Self {
             db,
             battle_ids: Arc::new(battle_ids),
-            summaries: Arc::new(summaries),
+            summaries: Arc::new(Mutex::new(HashMap::new())),
             replay_json_cache: replay_json_cache(),
         })
     }
@@ -171,12 +161,12 @@ impl ReplayDb {
         limit: usize,
     ) -> Result<ReplayListResponse, ReplayDbError> {
         let items = self
-            .summaries
+            .battle_ids
             .iter()
             .skip(offset)
             .take(limit)
-            .cloned()
-            .collect::<Vec<_>>();
+            .map(|battle_id| self.get_replay_summary(*battle_id))
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(ReplayListResponse {
             total: self.total(),
@@ -184,6 +174,36 @@ impl ReplayDb {
             limit,
             items,
         })
+    }
+
+    fn get_replay_summary(&self, battle_id: u64) -> Result<ReplaySummary, ReplayDbError> {
+        if let Some(summary) = self
+            .summaries
+            .lock()
+            .map_err(|_| ReplayDbError::new("summary cache mutex poisoned"))?
+            .get(&battle_id)
+            .cloned()
+        {
+            return Ok(summary);
+        }
+
+        let key = battle_id.to_string();
+        let Some(value) = self
+            .db
+            .get(key.as_bytes())
+            .map_err(|err| ReplayDbError::new(err.to_string()))?
+        else {
+            return Err(ReplayDbError::new(format!(
+                "battle_id {battle_id} disappeared from the replay DB"
+            )));
+        };
+
+        let summary = decode_replay_summary(value.as_ref())?;
+        self.summaries
+            .lock()
+            .map_err(|_| ReplayDbError::new("summary cache mutex poisoned"))?
+            .insert(battle_id, summary.clone());
+        Ok(summary)
     }
 }
 
