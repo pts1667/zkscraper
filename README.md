@@ -1,12 +1,17 @@
 # zkscraper
 
 Scrapes zero-k.info and gathers replays into snapshots.
-Can auto-download missing maps.
+Can auto-download missing maps and parses replays using spring-headless.
 
 Currently, can't support maps that generate their terrain through scripts (Violet etc.), though this can be added if requested.
 
 Credits to the original Zero-K scraper, which this was primarily based on:
 https://github.com/esainane/zkstats
+
+Todo:
+- multiprocess parsing
+- 'listen mode' for the web server to process replays as they come in, rather than bulk processing
+- web server UI
 
 ## AI Disclaimer
 
