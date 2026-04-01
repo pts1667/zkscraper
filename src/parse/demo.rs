@@ -57,7 +57,7 @@ fn extract_command_history(bytes: &[u8]) -> Result<Vec<CommandRecord>, Box<dyn s
     let mut commands = Vec::new();
 
     while offset + 8 <= stream_end {
-        let mod_game_time = f32::from_le_bytes(bytes[offset..offset + 4].try_into()?);
+        let _mod_game_time = f32::from_le_bytes(bytes[offset..offset + 4].try_into()?);
         let chunk_len = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into()?) as usize;
         offset += 8;
 
@@ -82,28 +82,19 @@ fn extract_command_history(bytes: &[u8]) -> Result<Vec<CommandRecord>, Box<dyn s
             }
             11 => {
                 if let Some(record) =
-                    parse_command_packet(packet, current_frame, mod_game_time, &player_selection)?
+                    parse_command_packet(packet, current_frame, &player_selection)?
                 {
                     commands.push(record);
                 }
             }
             14 => {
-                if let Some(record) = parse_ai_command_packet(packet, current_frame, mod_game_time)?
-                {
+                if let Some(record) = parse_ai_command_packet(packet, current_frame)? {
                     commands.push(record);
                 }
             }
-            15 => {
-                commands.extend(parse_ai_commands_packet(
-                    packet,
-                    current_frame,
-                    mod_game_time,
-                )?);
-            }
+            15 => commands.extend(parse_ai_commands_packet(packet, current_frame)?),
             76 => {
-                if let Some(record) =
-                    parse_ai_command_tracked_packet(packet, current_frame, mod_game_time)?
-                {
+                if let Some(record) = parse_ai_command_tracked_packet(packet, current_frame)? {
                     commands.push(record);
                 }
             }
@@ -146,24 +137,24 @@ fn parse_demo_header(bytes: &[u8]) -> Result<DemoHeader, Box<dyn std::error::Err
 fn parse_command_packet(
     packet: &[u8],
     current_frame: u32,
-    mod_game_time: f32,
     player_selection: &HashMap<u8, Vec<i32>>,
 ) -> Result<Option<CommandRecord>, Box<dyn std::error::Error>> {
-    if packet.len() < 9 {
+    if packet.len() < 17 {
         return Ok(None);
     }
     let message_size = u16::from_le_bytes(packet[1..3].try_into()?) as usize;
-    let packet = &packet[..packet.len().min(message_size.max(9))];
-    if packet.len() < 9 {
+    let packet = &packet[..packet.len().min(message_size.max(17))];
+    if packet.len() < 17 {
         return Ok(None);
     }
 
     let player_id = packet[3];
     let command_id = i32::from_le_bytes(packet[4..8].try_into()?);
-    let options = packet[8] as u32;
+    let options = packet[12] as u32;
+    let num_params = u32::from_le_bytes(packet[13..17].try_into()?) as usize;
     let mut params = Vec::new();
-    let mut pos = 9;
-    while pos + 4 <= packet.len() {
+    let mut pos = 17;
+    while pos + 4 <= packet.len() && params.len() < num_params {
         params.push(f32::from_le_bytes(packet[pos..pos + 4].try_into()?));
         pos += 4;
     }
@@ -172,7 +163,7 @@ fn parse_command_packet(
 
     Ok(Some(CommandRecord {
         frame: current_frame,
-        game_seconds: safe_game_seconds(mod_game_time, current_frame),
+        game_seconds: frame_game_seconds(current_frame),
         player_id: player_id as u32,
         ai_id: None,
         command_id,
@@ -189,25 +180,25 @@ fn parse_command_packet(
 fn parse_ai_command_packet(
     packet: &[u8],
     current_frame: u32,
-    mod_game_time: f32,
 ) -> Result<Option<CommandRecord>, Box<dyn std::error::Error>> {
-    if packet.len() < 12 {
+    if packet.len() < 21 {
         return Ok(None);
     }
     let message_size = u16::from_le_bytes(packet[1..3].try_into()?) as usize;
-    let packet = &packet[..packet.len().min(message_size.max(12))];
-    if packet.len() < 12 {
+    let packet = &packet[..packet.len().min(message_size.max(21))];
+    if packet.len() < 21 {
         return Ok(None);
     }
 
     let player_id = packet[3];
     let ai_id = packet[4];
-    let unit_id = i16::from_le_bytes(packet[5..7].try_into()?) as i32;
-    let command_id = i32::from_le_bytes(packet[7..11].try_into()?);
-    let options = packet[11] as u32;
+    let unit_id = i16::from_le_bytes(packet[6..8].try_into()?) as i32;
+    let command_id = i32::from_le_bytes(packet[8..12].try_into()?);
+    let options = packet[16] as u32;
+    let num_params = u32::from_le_bytes(packet[17..21].try_into()?) as usize;
     let mut params = Vec::new();
-    let mut pos = 12;
-    while pos + 4 <= packet.len() {
+    let mut pos = 21;
+    while pos + 4 <= packet.len() && params.len() < num_params {
         params.push(f32::from_le_bytes(packet[pos..pos + 4].try_into()?));
         pos += 4;
     }
@@ -215,7 +206,7 @@ fn parse_ai_command_packet(
     let decoded = decode_command(command_id, options, &params);
     Ok(Some(CommandRecord {
         frame: current_frame,
-        game_seconds: safe_game_seconds(mod_game_time, current_frame),
+        game_seconds: frame_game_seconds(current_frame),
         player_id: player_id as u32,
         ai_id: Some(ai_id as u32),
         command_id,
@@ -229,26 +220,25 @@ fn parse_ai_command_packet(
 fn parse_ai_command_tracked_packet(
     packet: &[u8],
     current_frame: u32,
-    mod_game_time: f32,
 ) -> Result<Option<CommandRecord>, Box<dyn std::error::Error>> {
-    if packet.len() < 16 {
+    if packet.len() < 25 {
         return Ok(None);
     }
     let message_size = u16::from_le_bytes(packet[1..3].try_into()?) as usize;
-    let packet = &packet[..packet.len().min(message_size.max(16))];
-    if packet.len() < 16 {
+    let packet = &packet[..packet.len().min(message_size.max(25))];
+    if packet.len() < 25 {
         return Ok(None);
     }
 
     let player_id = packet[3];
     let ai_id = packet[4];
-    let unit_id = i16::from_le_bytes(packet[5..7].try_into()?) as i32;
-    let command_id = i32::from_le_bytes(packet[7..11].try_into()?);
-    let options = packet[11] as u32;
-    let param_size = u16::from_le_bytes(packet[14..16].try_into()?) as usize;
+    let unit_id = i16::from_le_bytes(packet[6..8].try_into()?) as i32;
+    let command_id = i32::from_le_bytes(packet[8..12].try_into()?);
+    let options = packet[16] as u32;
+    let num_params = u32::from_le_bytes(packet[17..21].try_into()?) as usize;
     let mut params = Vec::new();
-    let mut pos = 16;
-    while pos + 4 <= packet.len() && pos + 4 <= 16 + param_size {
+    let mut pos = 25;
+    while pos + 4 <= packet.len() && params.len() < num_params {
         params.push(f32::from_le_bytes(packet[pos..pos + 4].try_into()?));
         pos += 4;
     }
@@ -256,7 +246,7 @@ fn parse_ai_command_tracked_packet(
     let decoded = decode_command(command_id, options, &params);
     Ok(Some(CommandRecord {
         frame: current_frame,
-        game_seconds: safe_game_seconds(mod_game_time, current_frame),
+        game_seconds: frame_game_seconds(current_frame),
         player_id: player_id as u32,
         ai_id: Some(ai_id as u32),
         command_id,
@@ -270,25 +260,23 @@ fn parse_ai_command_tracked_packet(
 fn parse_ai_commands_packet(
     packet: &[u8],
     current_frame: u32,
-    mod_game_time: f32,
 ) -> Result<Vec<CommandRecord>, Box<dyn std::error::Error>> {
-    if packet.len() < 16 {
+    if packet.len() < 15 {
         return Ok(Vec::new());
     }
     let message_size = u16::from_le_bytes(packet[1..3].try_into()?) as usize;
-    let packet = &packet[..packet.len().min(message_size.max(16))];
-    if packet.len() < 16 {
+    let packet = &packet[..packet.len().min(message_size.max(15))];
+    if packet.len() < 15 {
         return Ok(Vec::new());
     }
 
     let player_id = packet[3];
     let ai_id = packet[4];
-    let mut pos = 11;
-    let same_command_id = i32::from_le_bytes(packet[7..11].try_into()?);
-    let same_options = packet[11] as u32;
-    pos += 1;
-    let same_param_size = u16::from_le_bytes(packet[pos..pos + 2].try_into()?) as usize;
-    pos += 2;
+    let pairwise = packet[5] != 0;
+    let same_command_id = u32::from_le_bytes(packet[6..10].try_into()?);
+    let same_options = packet[10] as u32;
+    let same_param_count = u16::from_le_bytes(packet[11..13].try_into()?) as usize;
+    let mut pos = 13;
 
     if pos + 2 > packet.len() {
         return Ok(Vec::new());
@@ -311,37 +299,71 @@ fn parse_ai_commands_packet(
     pos += 2;
 
     let mut records = Vec::with_capacity(command_count);
-    for _ in 0..command_count {
-        if pos + 5 > packet.len() {
-            break;
-        }
-        let command_id = same_command_id;
-        let options = same_options;
-        let param_bytes = same_param_size;
-        if pos + param_bytes > packet.len() {
-            break;
-        }
+    for index in 0..command_count {
+        let command_id = if same_command_id == 0 {
+            if pos + 4 > packet.len() {
+                break;
+            }
+            let command_id = i32::from_le_bytes(packet[pos..pos + 4].try_into()?);
+            pos += 4;
+            command_id
+        } else {
+            same_command_id as i32
+        };
 
-        let mut params = Vec::new();
-        let mut param_pos = pos;
-        while param_pos + 4 <= pos + param_bytes {
-            params.push(f32::from_le_bytes(
-                packet[param_pos..param_pos + 4].try_into()?,
-            ));
-            param_pos += 4;
+        let options = if same_options == 0xFF {
+            if pos + 1 > packet.len() {
+                break;
+            }
+            let options = packet[pos] as u32;
+            pos += 1;
+            options
+        } else {
+            same_options
+        };
+
+        let param_count = if same_param_count == 0xFFFF {
+            if pos + 2 > packet.len() {
+                break;
+            }
+            let param_count = u16::from_le_bytes(packet[pos..pos + 2].try_into()?) as usize;
+            pos += 2;
+            param_count
+        } else {
+            same_param_count
+        };
+
+        let mut params = Vec::with_capacity(param_count);
+        while params.len() < param_count {
+            if pos + 4 > packet.len() {
+                break;
+            }
+            params.push(f32::from_le_bytes(packet[pos..pos + 4].try_into()?));
+            pos += 4;
         }
-        pos += param_bytes;
+        if params.len() != param_count {
+            break;
+        }
 
         let decoded = decode_command(command_id, options, &params);
+        let selected_unit_ids = if pairwise {
+            unit_ids
+                .get(index)
+                .copied()
+                .map(|unit_id| vec![unit_id])
+                .unwrap_or_default()
+        } else {
+            unit_ids.clone()
+        };
         records.push(CommandRecord {
             frame: current_frame,
-            game_seconds: safe_game_seconds(mod_game_time, current_frame),
+            game_seconds: frame_game_seconds(current_frame),
             player_id: player_id as u32,
             ai_id: Some(ai_id as u32),
             command_id,
             options,
             params,
-            selected_unit_ids: unit_ids.clone(),
+            selected_unit_ids,
             decoded,
         });
     }
@@ -349,12 +371,8 @@ fn parse_ai_commands_packet(
     Ok(records)
 }
 
-fn safe_game_seconds(mod_game_time: f32, current_frame: u32) -> f32 {
-    if mod_game_time.is_finite() && mod_game_time >= 0.0 {
-        mod_game_time
-    } else {
-        current_frame as f32 / 30.0
-    }
+fn frame_game_seconds(current_frame: u32) -> f32 {
+    current_frame as f32 / 30.0
 }
 
 fn parse_select_packet(
@@ -822,4 +840,112 @@ fn extract_springie_stats(bytes: &[u8]) -> Vec<String> {
         seen.insert(captures.as_str().to_string(), ());
     }
     seen.into_keys().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::{
+        parse_ai_command_packet, parse_ai_commands_packet, parse_ai_command_tracked_packet,
+        parse_command_packet,
+    };
+
+    #[test]
+    fn parses_command_packet_with_timeout_and_param_count() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let packet = Vec::from([
+            0x0b, 0x21, 0x00, 0x00, 0x68, 0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f, 0x00,
+            0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0xae, 0x44, 0xe8, 0x4d, 0x39, 0x42, 0x00,
+            0x00, 0x42, 0x44, 0x00, 0x00, 0x80, 0x3f,
+        ]);
+
+        let mut selection = HashMap::new();
+        selection.insert(0, vec![123, 456]);
+        let command = parse_command_packet(&packet, 21, &selection)?.expect("command");
+
+        assert_eq!(command.player_id, 0);
+        assert_eq!(command.command_id, -408);
+        assert_eq!(command.options, 0);
+        assert_eq!(command.params.len(), 4);
+        assert_eq!(command.selected_unit_ids, vec![123, 456]);
+        assert!((command.game_seconds - 0.7).abs() < 0.0001);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_ai_command_packet_with_team_timeout_and_params(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let packet = Vec::from([
+            0x0e, 0x25, 0x00, 0x01, 0xff, 0xff, 0xce, 0x29, 0x61, 0xfe, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0x7f, 0x20, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x9c, 0x45, 0x00,
+            0x00, 0x00, 0x80, 0x00, 0x00, 0xf8, 0x43, 0x00, 0x00, 0x40, 0x40,
+        ]);
+
+        let command = parse_ai_command_packet(&packet, 10)?.expect("ai command");
+
+        assert_eq!(command.player_id, 1);
+        assert_eq!(command.ai_id, Some(255));
+        assert_eq!(command.selected_unit_ids, vec![10702]);
+        assert_eq!(command.command_id, -415);
+        assert_eq!(command.options, 32);
+        assert_eq!(command.params.len(), 4);
+        assert!((command.game_seconds - (10.0 / 30.0)).abs() < 0.0001);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_tracked_ai_command_packet() -> Result<(), Box<dyn std::error::Error>> {
+        let packet = Vec::from([
+            0x4c, 0x1d, 0x00, 0x02, 0xff, 0xff, 0x2a, 0x00, 0x14, 0x00, 0x00, 0x00, 0x78,
+            0x56, 0x34, 0x12, 0x20, 0x01, 0x00, 0x00, 0x00, 0x99, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x80, 0x3f,
+        ]);
+
+        let command = parse_ai_command_tracked_packet(&packet, 60)?.expect("tracked command");
+
+        assert_eq!(command.player_id, 2);
+        assert_eq!(command.ai_id, Some(255));
+        assert_eq!(command.selected_unit_ids, vec![42]);
+        assert_eq!(command.command_id, 20);
+        assert_eq!(command.options, 32);
+        assert_eq!(command.params, vec![1.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_ai_commands_packet_pairwise() -> Result<(), Box<dyn std::error::Error>> {
+        let mut packet = vec![0x0f, 0x00, 0x00];
+        packet.extend_from_slice(&[0x03, 0xff, 0x01]);
+        packet.extend_from_slice(&0u32.to_le_bytes());
+        packet.push(0xff);
+        packet.extend_from_slice(&0xffffu16.to_le_bytes());
+        packet.extend_from_slice(&2u16.to_le_bytes());
+        packet.extend_from_slice(&10i16.to_le_bytes());
+        packet.extend_from_slice(&20i16.to_le_bytes());
+        packet.extend_from_slice(&2u16.to_le_bytes());
+        packet.extend_from_slice(&20i32.to_le_bytes());
+        packet.push(32);
+        packet.extend_from_slice(&1u16.to_le_bytes());
+        packet.extend_from_slice(&1.0f32.to_le_bytes());
+        packet.extend_from_slice(&10i32.to_le_bytes());
+        packet.push(0);
+        packet.extend_from_slice(&0u16.to_le_bytes());
+        let packet_size = packet.len() as u16;
+        packet[1..3].copy_from_slice(&packet_size.to_le_bytes());
+
+        let commands = parse_ai_commands_packet(&packet, 90)?;
+
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0].player_id, 3);
+        assert_eq!(commands[0].ai_id, Some(255));
+        assert_eq!(commands[0].selected_unit_ids, vec![10]);
+        assert_eq!(commands[0].command_id, 20);
+        assert_eq!(commands[0].options, 32);
+        assert_eq!(commands[0].params, vec![1.0]);
+        assert_eq!(commands[1].selected_unit_ids, vec![20]);
+        assert_eq!(commands[1].command_id, 10);
+        assert!(commands[1].params.is_empty());
+        Ok(())
+    }
 }
