@@ -104,6 +104,22 @@ enum Commands {
         #[arg(long)]
         snapshot_path: PathBuf,
     },
+
+    /// Rebuild command history for an existing parsed replay DB from raw replay files
+    #[command(name = "backfill-commands")]
+    BackfillCommands {
+        /// Input directory for raw replays (.sdfz)
+        #[arg(long)]
+        sdfz_in: PathBuf,
+
+        /// Existing sled DB directory for parsed replays
+        #[arg(long)]
+        snapshot_path: PathBuf,
+
+        /// Optional path to Zero-K portable for unit-name enrichment
+        #[arg(long)]
+        zk_path: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -183,5 +199,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             })
             .await
         }
+        Commands::BackfillCommands {
+            sdfz_in,
+            snapshot_path,
+            zk_path,
+        } => parse::backfill_commands(sdfz_in, snapshot_path, zk_path).await,
     }
 }
