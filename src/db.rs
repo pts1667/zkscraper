@@ -7,6 +7,7 @@ use std::{
 };
 
 use fastapi::ToSchema;
+use indicatif::ProgressBar;
 use lru::LruCache;
 use serde::{Deserialize, Serialize};
 
@@ -32,12 +33,14 @@ impl std::error::Error for ReplayDbError {}
 #[derive(Debug, Clone)]
 pub struct ReplayDb {
     db: sled::Db,
+    summary_tree: sled::Tree,
     battle_ids: Arc<Vec<u64>>,
     summaries: Arc<Mutex<HashMap<u64, ReplaySummary>>>,
     replay_json_cache: Option<Arc<Mutex<LruCache<u64, Arc<serde_json::Value>>>>>,
 }
 
 const DEFAULT_REPLAY_JSON_CACHE_SIZE: usize = 0;
+const REPLAY_SUMMARY_TREE: &str = "replay_summaries";
 
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct ReplaySummary {
@@ -69,6 +72,9 @@ pub struct ReplayListResponse {
 impl ReplayDb {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ReplayDbError> {
         let db = sled::open(path).map_err(|err| ReplayDbError::new(err.to_string()))?;
+        let summary_tree = db
+            .open_tree(REPLAY_SUMMARY_TREE)
+            .map_err(|err| ReplayDbError::new(err.to_string()))?;
         let mut battle_ids = Vec::with_capacity(db.len());
         for entry in db.iter() {
             let (key, _) = entry.map_err(|err| ReplayDbError::new(err.to_string()))?;
@@ -83,6 +89,7 @@ impl ReplayDb {
 
         Ok(Self {
             db,
+            summary_tree,
             battle_ids: Arc::new(battle_ids),
             summaries: Arc::new(Mutex::new(HashMap::new())),
             replay_json_cache: replay_json_cache(),
@@ -176,6 +183,42 @@ impl ReplayDb {
         })
     }
 
+    pub fn build_summary_index(&self) -> Result<usize, ReplayDbError> {
+        let pb = ProgressBar::new(self.battle_ids.len() as u64);
+        pb.set_message("building replay summaries");
+        let mut generated = 0usize;
+
+        for battle_id in self.battle_ids.iter().copied() {
+            if load_replay_summary(&self.summary_tree, battle_id)?.is_none() {
+                let key = battle_id.to_string();
+                let Some(value) = self
+                    .db
+                    .get(key.as_bytes())
+                    .map_err(|err| ReplayDbError::new(err.to_string()))?
+                else {
+                    return Err(ReplayDbError::new(format!(
+                        "battle_id {battle_id} disappeared from the replay DB"
+                    )));
+                };
+
+                let summary = decode_replay_summary(value.as_ref())?;
+                store_replay_summary(&self.summary_tree, battle_id, &summary)?;
+                self.summaries
+                    .lock()
+                    .map_err(|_| ReplayDbError::new("summary cache mutex poisoned"))?
+                    .insert(battle_id, summary);
+                generated += 1;
+            }
+            pb.inc(1);
+        }
+
+        self.summary_tree
+            .flush()
+            .map_err(|err| ReplayDbError::new(err.to_string()))?;
+        pb.finish_with_message(format!("built {generated} replay summaries"));
+        Ok(generated)
+    }
+
     fn get_replay_summary(&self, battle_id: u64) -> Result<ReplaySummary, ReplayDbError> {
         if let Some(summary) = self
             .summaries
@@ -184,6 +227,14 @@ impl ReplayDb {
             .get(&battle_id)
             .cloned()
         {
+            return Ok(summary);
+        }
+
+        if let Some(summary) = load_replay_summary(&self.summary_tree, battle_id)? {
+            self.summaries
+                .lock()
+                .map_err(|_| ReplayDbError::new("summary cache mutex poisoned"))?
+                .insert(battle_id, summary.clone());
             return Ok(summary);
         }
 
@@ -199,12 +250,42 @@ impl ReplayDb {
         };
 
         let summary = decode_replay_summary(value.as_ref())?;
+        store_replay_summary(&self.summary_tree, battle_id, &summary)?;
         self.summaries
             .lock()
             .map_err(|_| ReplayDbError::new("summary cache mutex poisoned"))?
             .insert(battle_id, summary.clone());
         Ok(summary)
     }
+}
+
+pub fn store_replay_summary(
+    summary_tree: &sled::Tree,
+    battle_id: u64,
+    summary: &ReplaySummary,
+) -> Result<(), ReplayDbError> {
+    let key = battle_id.to_string();
+    let payload = serde_json::to_vec(summary).map_err(|err| ReplayDbError::new(err.to_string()))?;
+    summary_tree
+        .insert(key.as_bytes(), payload)
+        .map_err(|err| ReplayDbError::new(err.to_string()))?;
+    Ok(())
+}
+
+fn load_replay_summary(
+    summary_tree: &sled::Tree,
+    battle_id: u64,
+) -> Result<Option<ReplaySummary>, ReplayDbError> {
+    let key = battle_id.to_string();
+    let Some(value) = summary_tree
+        .get(key.as_bytes())
+        .map_err(|err| ReplayDbError::new(err.to_string()))?
+    else {
+        return Ok(None);
+    };
+    let summary =
+        serde_json::from_slice(value.as_ref()).map_err(|err| ReplayDbError::new(err.to_string()))?;
+    Ok(Some(summary))
 }
 
 impl ReplaySummary {

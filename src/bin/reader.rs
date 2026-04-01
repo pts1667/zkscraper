@@ -32,6 +32,9 @@ enum Command {
         #[arg(long)]
         lossy: bool,
     },
+
+    /// Build or refresh the lightweight summary index with a progress bar
+    BuildSummaryIndex,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -57,6 +60,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .ok_or_else(|| format!("battle_id {} not found", battle_id))?;
                 print_parsed_replay_summary(&parsed);
             }
+        }
+        Command::BuildSummaryIndex => {
+            let db = ReplayDb::open(args.db)?;
+            let generated = db.build_summary_index()?;
+            println!("generated_summaries: {generated}");
         }
     }
 

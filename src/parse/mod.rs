@@ -9,6 +9,7 @@ use std::{
 };
 
 use indicatif::ProgressBar;
+use crate::db::{store_replay_summary, ReplaySummary};
 
 mod demo;
 mod headless;
@@ -53,6 +54,7 @@ pub async fn parse_replays(
         let manifest =
             sort_manifest_by_replay_size(read_manifest(&settings.sdfz_in.join(MANIFEST_FILENAME))?, &settings.sdfz_in);
         let db = sled::open(&settings.snapshot_path)?;
+        let summary_tree = db.open_tree("replay_summaries")?;
         let temp_root = settings.snapshot_path.join("_tmp");
         let zk_capture_root = settings.zk_path.join(ZK_CAPTURE_ROOT);
         fs::create_dir_all(&temp_root)?;
@@ -146,7 +148,13 @@ pub async fn parse_replays(
                 let payload = serde_json::to_vec(&parsed)?;
                 let compressed = zstd::encode_all(payload.as_slice(), 3)?;
                 db.insert(key.as_bytes(), compressed)?;
+                store_replay_summary(
+                    &summary_tree,
+                    entry.battle_id,
+                    &ReplaySummary::from(&parsed),
+                )?;
                 db.flush()?;
+                summary_tree.flush()?;
                 Ok(())
             }
             .await;
@@ -195,6 +203,7 @@ pub async fn backfill_commands(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let manifest = read_manifest(&sdfz_in.join(MANIFEST_FILENAME))?;
     let db = sled::open(&snapshot_path)?;
+    let summary_tree = db.open_tree("replay_summaries")?;
     let pb = ProgressBar::new(manifest.len() as u64);
     let mut failures = Vec::new();
     let mut unit_name_cache: HashMap<String, HashMap<u32, String>> = HashMap::new();
@@ -232,7 +241,13 @@ pub async fn backfill_commands(
             let payload = serde_json::to_vec(&parsed)?;
             let compressed = zstd::encode_all(payload.as_slice(), 3)?;
             db.insert(key.as_bytes(), compressed)?;
+            store_replay_summary(
+                &summary_tree,
+                entry.battle_id,
+                &ReplaySummary::from_value(&parsed),
+            )?;
             db.flush()?;
+            summary_tree.flush()?;
             Ok(())
         })();
 
