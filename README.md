@@ -54,6 +54,8 @@ Supports `--temp <dir>` to stage intermediate files somewhere else.
 If `--out` already exists, seeds the working DB from it before parsing so the pipeline updates the existing DB rather than starting from scratch.
 If a stage fails, preserves the best available parsed DB state at `<out>_fail`.
 
+After this, serve the database over a local web server: [Serve Parsed Data Over HTTP](#serve-parsed-data-over-http)
+
 ## 1. Gather Battle IDs
 
 This writes a CSV with:
