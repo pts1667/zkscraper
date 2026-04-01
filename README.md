@@ -5,6 +5,13 @@ Can auto-download missing maps.
 
 Currently, can't support maps that generate their terrain through scripts (Violet etc.), though this can be added if requested.
 
+Credits to the original Zero-K scraper, which this was primarily based on:
+https://github.com/esainane/zkstats
+
+## AI Disclaimer
+
+Made with GPT-5.4 using Codex, mid-way through development (when I un-abandoned it). No AI generated artwork was used.
+
 ## Requirements
 
 - Rust toolchain with `cargo`
