@@ -1,5 +1,4 @@
 use indicatif::ProgressBar;
-use percent_encoding::percent_decode_str;
 use regex::Regex;
 use std::{
     collections::{HashMap, HashSet},
@@ -9,6 +8,7 @@ use tokio::time::Duration;
 use url::Url;
 
 use crate::http::RateLimitedHttpClient;
+use crate::maps::resolve_map_archive_name_from_battle;
 
 pub struct GatherFilterSettings {
     pub title: Option<String>,
@@ -180,10 +180,6 @@ pub async fn gather_battle_ids(
     let zero_k_version_re = Regex::new(r#"\(Zero-K v(?<version>[^\)]+)\)"#)?;
     let map_thumbnail_re =
         Regex::new(r#"<img src='/Resources/(?<map_file>[^/'"]+?)\.(?:thumbnail|minimap)\.jpg'"#)?;
-    let map_detail_re = Regex::new(r#"<a href="(?P<path>/Maps/Detail/\d+)""#)?;
-    let map_download_re = Regex::new(
-        r#"(https?://zero-k\.info/content/(?:maps|games)/(?P<filename>[^"']+\.(?:sd7|sdz))|//zero-k\.info/content/(?:maps|games)/(?P<filename_scheme_relative>[^"']+\.(?:sd7|sdz)))"#,
-    )?;
 
     let http_client =
         RateLimitedHttpClient::new(Duration::from_millis(settings.min_req_wait as u64));
@@ -245,60 +241,18 @@ pub async fn gather_battle_ids(
                     map_archives.insert(map_key.clone(), archive.clone());
                     archive
                 } else {
-                    let battle_url = settings
-                        .site_url
-                        .join("Battles/Detail/")?
-                        .join(&battle_id)?;
-                    let battle_html = http_client
-                        .send(http_client.raw().get(battle_url))
-                        .await?
-                        .text()
-                        .await?;
-
-                    let map_detail_path = map_detail_re
-                        .captures(&battle_html)
-                        .and_then(|cap| cap.name("path").map(|m| m.as_str().to_string()))
-                        .ok_or_else(|| {
-                            format!(
-                                "could not resolve map detail page while gathering battle {}",
-                                battle_id
-                            )
-                        })?;
-
-                    let map_detail_url = settings.site_url.join(&map_detail_path)?;
-                    let map_html = http_client
-                        .send(http_client.raw().get(map_detail_url))
-                        .await?
-                        .text()
-                        .await?;
-
-                    let captures = map_download_re.captures(&map_html).ok_or_else(|| {
+                    let archive = resolve_map_archive_name_from_battle(
+                        battle_id_p,
+                        &http_client,
+                        &settings.site_url,
+                    )
+                    .await?
+                    .ok_or_else(|| {
                         format!(
                             "could not resolve map archive while gathering battle {}",
                             battle_id
                         )
                     })?;
-                    let archive_filename = captures
-                        .name("filename")
-                        .or_else(|| captures.name("filename_scheme_relative"))
-                        .map(|m| m.as_str().to_string())
-                        .ok_or_else(|| {
-                            format!(
-                                "could not extract map archive while gathering battle {}",
-                                battle_id
-                            )
-                        })?;
-                    let decoded_filename = percent_decode_str(&archive_filename)
-                        .decode_utf8()?
-                        .to_string();
-                    let (archive_base, archive_extension) =
-                        decoded_filename.rsplit_once('.').ok_or_else(|| {
-                            format!(
-                                "map archive missing extension while gathering battle {}",
-                                battle_id
-                            )
-                        })?;
-                    let archive = (archive_base.to_string(), archive_extension.to_string());
                     map_archives.insert(map_key.clone(), archive.clone());
                     archive
                 };

@@ -32,6 +32,29 @@ fn decode_url_filename(url: &str) -> Result<String, Box<dyn std::error::Error>> 
     Ok(percent_decode_str(filename).decode_utf8()?.to_string())
 }
 
+fn parse_map_download_url(
+    map_html: &str,
+    site_url: &Url,
+) -> Result<Option<Url>, Box<dyn std::error::Error>> {
+    let map_download_re = Regex::new(
+        r#"(?P<url>(?:https?:)?//[^"' ]+/content/(?:maps|games)/[^"'?#]+\.sd[7z](?:\?[^"'#]*)?|/content/(?:maps|games)/[^"'?#]+\.sd[7z](?:\?[^"'#]*)?)"#,
+    )?;
+    let Some(download_match) = map_download_re.captures(map_html) else {
+        return Ok(None);
+    };
+    let raw_url = download_match.name("url").unwrap().as_str();
+
+    let download_url = if raw_url.starts_with("//") {
+        Url::parse(&format!("https:{raw_url}"))?
+    } else if raw_url.starts_with('/') {
+        site_url.join(raw_url)?
+    } else {
+        Url::parse(raw_url)?
+    };
+
+    Ok(Some(download_url))
+}
+
 fn map_archive_present(maps_dir: &Path, map_file_base: &str) -> Option<PathBuf> {
     let decoded_sd7 = maps_dir.join(format!("{map_file_base}.sd7"));
     if decoded_sd7.is_file() {
@@ -117,7 +140,7 @@ fn parse_unique_maps(
     Ok(maps)
 }
 
-async fn resolve_map_download_url_from_battle(
+pub async fn resolve_map_download_url_from_battle(
     battle_id: u64,
     client: &RateLimitedHttpClient,
     site_url: &Url,
@@ -131,7 +154,7 @@ async fn resolve_map_download_url_from_battle(
         .text()
         .await?;
 
-    let map_detail_re = Regex::new(r#"<a href="(?P<path>/Maps/Detail/\d+)""#)?;
+    let map_detail_re = Regex::new(r#"<a href=['"](?P<path>/Maps/Detail/\d+)['"]"#)?;
     let Some(map_detail_match) = map_detail_re.captures(&battle_html) else {
         return Ok(None);
     };
@@ -142,19 +165,28 @@ async fn resolve_map_download_url_from_battle(
         .await?
         .text()
         .await?;
-    let map_download_re = Regex::new(
-        r#"(https?://zero-k\.info/content/(?:maps|games)/[^"']+\.sd[7z]|//zero-k\.info/content/(?:maps|games)/[^"']+\.sd[7z])"#,
-    )?;
-    let Some(download_match) = map_download_re.find(&map_html) else {
+    parse_map_download_url(&map_html, site_url)
+}
+
+pub async fn resolve_map_archive_name_from_battle(
+    battle_id: u64,
+    client: &RateLimitedHttpClient,
+    site_url: &Url,
+) -> Result<Option<(String, String)>, Box<dyn std::error::Error>> {
+    let Some(download_url) = resolve_map_download_url_from_battle(battle_id, client, site_url).await?
+    else {
         return Ok(None);
     };
 
-    let download_url = if download_match.as_str().starts_with("//") {
-        format!("https:{}", download_match.as_str())
-    } else {
-        download_match.as_str().to_string()
+    let decoded_filename = decode_url_filename(download_url.as_str())?;
+    let Some((archive_base, archive_extension)) = decoded_filename.rsplit_once('.') else {
+        return Ok(None);
     };
-    Ok(Some(Url::parse(&download_url)?))
+
+    Ok(Some((
+        archive_base.to_string(),
+        archive_extension.to_string(),
+    )))
 }
 
 async fn download_map(
