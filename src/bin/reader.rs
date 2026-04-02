@@ -212,14 +212,8 @@ fn list_battle_ids(
     db_path: &PathBuf,
     max_count: Option<usize>,
 ) -> Result<Vec<u64>, Box<dyn std::error::Error>> {
-    let db = sled::open(db_path)?;
-    let mut battle_ids = Vec::with_capacity(max_count.unwrap_or_else(|| db.len()));
-    for entry in db.iter() {
-        let (key, _) = entry?;
-        let key = std::str::from_utf8(key.as_ref())?;
-        battle_ids.push(key.parse::<u64>()?);
-    }
-    battle_ids.sort_unstable();
+    let db = ReplayDb::open(db_path)?;
+    let mut battle_ids = db.battle_ids().to_vec();
     if let Some(max_count) = max_count {
         battle_ids.truncate(max_count);
     }

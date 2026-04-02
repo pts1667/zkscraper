@@ -9,7 +9,7 @@ use std::{
 };
 
 use indicatif::ProgressBar;
-use crate::db::{store_replay_summary, ReplaySummary};
+use crate::db::ReplayDb;
 
 mod demo;
 mod headless;
@@ -53,8 +53,7 @@ pub async fn parse_replays(
 
         let manifest =
             sort_manifest_by_replay_size(read_manifest(&settings.sdfz_in.join(MANIFEST_FILENAME))?, &settings.sdfz_in);
-        let db = sled::open(&settings.snapshot_path)?;
-        let summary_tree = db.open_tree("replay_summaries")?;
+        let db = ReplayDb::open(&settings.snapshot_path)?;
         let temp_root = settings.snapshot_path.join("_tmp");
         let zk_capture_root = settings.zk_path.join(ZK_CAPTURE_ROOT);
         fs::create_dir_all(&temp_root)?;
@@ -77,8 +76,7 @@ pub async fn parse_replays(
                 return Err("parse interrupted by Ctrl+C".into());
             }
 
-            let key = entry.battle_id.to_string();
-            if db.contains_key(key.as_bytes())? {
+            if db.contains_replay(entry.battle_id)? {
                 pb.inc(1);
                 continue;
             }
@@ -145,16 +143,7 @@ pub async fn parse_replays(
                     springie_stats: dem_info.springie_stats,
                 };
 
-                let payload = serde_json::to_vec(&parsed)?;
-                let compressed = zstd::encode_all(payload.as_slice(), 3)?;
-                db.insert(key.as_bytes(), compressed)?;
-                store_replay_summary(
-                    &summary_tree,
-                    entry.battle_id,
-                    &ReplaySummary::from(&parsed),
-                )?;
-                db.flush()?;
-                summary_tree.flush()?;
+                db.put_replay(&parsed)?;
                 Ok(())
             }
             .await;
@@ -202,15 +191,13 @@ pub async fn backfill_commands(
     zk_path: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let manifest = read_manifest(&sdfz_in.join(MANIFEST_FILENAME))?;
-    let db = sled::open(&snapshot_path)?;
-    let summary_tree = db.open_tree("replay_summaries")?;
+    let db = ReplayDb::open(&snapshot_path)?;
     let pb = ProgressBar::new(manifest.len() as u64);
     let mut failures = Vec::new();
     let mut unit_name_cache: HashMap<String, HashMap<u32, String>> = HashMap::new();
 
     for entry in manifest {
-        let key = entry.battle_id.to_string();
-        let Some(existing) = db.get(key.as_bytes())? else {
+        let Some(mut parsed) = db.get_replay(entry.battle_id)? else {
             pb.inc(1);
             continue;
         };
@@ -235,19 +222,8 @@ pub async fn backfill_commands(
                 zk_path.as_deref(),
                 &mut unit_name_cache,
             )?;
-            let decompressed = zstd::decode_all(existing.as_ref())?;
-            let mut parsed: serde_json::Value = serde_json::from_slice(&decompressed)?;
-            parsed["command_history"] = serde_json::to_value(&dem_info.command_history)?;
-            let payload = serde_json::to_vec(&parsed)?;
-            let compressed = zstd::encode_all(payload.as_slice(), 3)?;
-            db.insert(key.as_bytes(), compressed)?;
-            store_replay_summary(
-                &summary_tree,
-                entry.battle_id,
-                &ReplaySummary::from_value(&parsed),
-            )?;
-            db.flush()?;
-            summary_tree.flush()?;
+            parsed.command_history = dem_info.command_history;
+            db.put_replay(&parsed)?;
             Ok(())
         })();
 

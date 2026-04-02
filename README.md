@@ -121,7 +121,10 @@ battle_id,replay_filename,game_version
 
 ## 4. Parse Replays
 
-This runs Zero-K headless and stores one compressed JSON record per battle ID in a `sled` DB.
+This runs Zero-K headless and stores parsed replays in a `sled` DB using CBOR:
+
+- key `<battle_id>` stores replay metadata, commands, events, and a frame index
+- key `<battle_id>_frame_<frame>` stores the snapshots for that exact frame
 
 ```powershell
 cargo run --release --bin zkscraper -- parse-replays `
@@ -193,6 +196,7 @@ Available endpoints:
 - `GET /healthz`
 - `GET /replays?offset=0&limit=100`
 - `GET /replays/{battle_id}`
+- `GET /replays/{battle_id}?snapshot_frame=240`
 - `GET /maps`
 - `GET /maps/{map_name}/heightmap.bmp`
 - `GET /maps/{map_name}/features`
@@ -210,9 +214,39 @@ Map asset behavior:
   - macOS: `7zz`
 - replay JSON caching is disabled by default; set `ZKSCRAPER_REPLAY_JSON_CACHE_SIZE` to a small positive integer to enable an LRU cache by replay count
 
+Replay lookup behavior:
+
+- `GET /replays/{battle_id}` returns the full replay record
+- `GET /replays/{battle_id}?snapshot_frame=<frame>` returns the same replay envelope with `global_snapshots`, `allyteam_snapshots`, and `economy_snapshots` filtered to that exact frame
+- if the replay exists but no snapshot is present at that frame, the endpoint returns `404`
+- full replay reads reconstruct the replay from metadata plus per-frame rows
+- `snapshot_frame` lookups read the metadata row and one frame row directly
+
+## Migrate Legacy Databases
+
+Legacy databases that stored one `zstd`-compressed JSON blob per battle must be migrated before use.
+
+```powershell
+cargo run --release --bin zkscraper -- migrate-db `
+  --src .\target\parsed-db-legacy `
+  --dst .\target\parsed-db
+```
+
+Behavior:
+
+- reads only the legacy top-level battle rows from `--src`
+- writes the new CBOR metadata/frame layout to `--dst`
+- rebuilds replay summaries in the destination DB
+- refuses to write into an existing destination path
+
 ## Stored Replay Structure
 
-Each replay record stores:
+Each replay is split across:
+
+- `<battle_id>` metadata row
+- zero or more `<battle_id>_frame_<frame>` snapshot rows
+
+The metadata row stores:
 
 - `battle_id`
 - `replay_filename`
@@ -224,11 +258,17 @@ Each replay record stores:
 - `players`
 - `teams`
 - `map_size`
-- `global_snapshots`
-- `allyteam_snapshots`
 - `command_history`
 - `events`
 - `springie_stats`
+- `snapshot_frames`
+
+Each frame row stores:
+
+- `frame`
+- `global_snapshot`
+- `allyteam_snapshots`
+- `economy_snapshots`
 
 ### Global Snapshots
 
@@ -343,4 +383,4 @@ If `pipeline` fails:
 If you want to inspect stored replay records directly:
 
 - use the `reader` binary first
-- the DB values are `zstd`-compressed JSON stored in `sled`
+- the DB values are CBOR stored in `sled`

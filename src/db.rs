@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     fmt,
+    fs,
     num::NonZeroUsize,
     path::Path,
     sync::{Arc, Mutex},
@@ -11,7 +12,13 @@ use indicatif::ProgressBar;
 use lru::LruCache;
 use serde::{Deserialize, Serialize};
 
-use crate::parse::ParsedReplay;
+use crate::{
+    parse::ParsedReplay,
+    storage::{
+        assemble_replay, build_partial_replay, decode_cbor, encode_cbor, split_replay,
+        ReplayFrameRecord, ReplayMetadataRecord,
+    },
+};
 
 #[derive(Debug)]
 pub struct ReplayDbError(String);
@@ -75,15 +82,12 @@ impl ReplayDb {
         let summary_tree = db
             .open_tree(REPLAY_SUMMARY_TREE)
             .map_err(|err| ReplayDbError::new(err.to_string()))?;
-        let mut battle_ids = Vec::with_capacity(db.len());
+        let mut battle_ids = Vec::new();
         for entry in db.iter() {
             let (key, _) = entry.map_err(|err| ReplayDbError::new(err.to_string()))?;
-            let key = std::str::from_utf8(key.as_ref())
-                .map_err(|err| ReplayDbError::new(err.to_string()))?;
-            let battle_id = key.parse::<u64>().map_err(|err| {
-                ReplayDbError::new(format!("invalid battle id key '{key}': {err}"))
-            })?;
-            battle_ids.push(battle_id);
+            if let Some(battle_id) = parse_metadata_key(key.as_ref()) {
+                battle_ids.push(battle_id);
+            }
         }
         battle_ids.sort_unstable();
 
@@ -104,17 +108,69 @@ impl ReplayDb {
         self.battle_ids.len()
     }
 
+    pub fn contains_replay(&self, battle_id: u64) -> Result<bool, ReplayDbError> {
+        self.db
+            .contains_key(metadata_key(battle_id).as_bytes())
+            .map_err(|err| ReplayDbError::new(err.to_string()))
+    }
+
+    pub fn put_replay(&self, replay: &ParsedReplay) -> Result<(), ReplayDbError> {
+        let (metadata, frames) = split_replay(replay);
+        self.clear_existing_frames(replay.battle_id)?;
+
+        let mut batch = sled::Batch::default();
+        batch.insert(
+            metadata_key(replay.battle_id).as_bytes(),
+            encode_cbor(&metadata).map_err(|err| ReplayDbError::new(err.to_string()))?,
+        );
+        for frame in &frames {
+            batch.insert(
+                frame_key(replay.battle_id, frame.frame).into_bytes(),
+                encode_cbor(frame).map_err(|err| ReplayDbError::new(err.to_string()))?,
+            );
+        }
+        self.db
+            .apply_batch(batch)
+            .map_err(|err| ReplayDbError::new(err.to_string()))?;
+        store_replay_summary(
+            &self.summary_tree,
+            replay.battle_id,
+            &ReplaySummary::from(replay),
+        )?;
+        self.db
+            .flush()
+            .map_err(|err| ReplayDbError::new(err.to_string()))?;
+        self.summary_tree
+            .flush()
+            .map_err(|err| ReplayDbError::new(err.to_string()))?;
+
+        self.summaries
+            .lock()
+            .map_err(|_| ReplayDbError::new("summary cache mutex poisoned"))?
+            .insert(replay.battle_id, ReplaySummary::from(replay));
+        if let Some(cache) = self.replay_json_cache.as_ref() {
+            cache
+                .lock()
+                .map_err(|_| ReplayDbError::new("replay cache mutex poisoned"))?
+                .pop(&replay.battle_id);
+        }
+        Ok(())
+    }
+
     pub fn get_replay(&self, battle_id: u64) -> Result<Option<ParsedReplay>, ReplayDbError> {
-        let key = battle_id.to_string();
-        let Some(value) = self
-            .db
-            .get(key.as_bytes())
-            .map_err(|err| ReplayDbError::new(err.to_string()))?
-        else {
+        let Some(metadata) = self.get_metadata_record(battle_id)? else {
             return Ok(None);
         };
-
-        decode_replay(value.as_ref()).map(Some)
+        let mut frames = Vec::with_capacity(metadata.snapshot_frames.len());
+        for frame in &metadata.snapshot_frames {
+            let Some(frame_record) = self.get_frame_record(battle_id, *frame)? else {
+                return Err(ReplayDbError::new(format!(
+                    "battle_id {battle_id} is missing frame row {frame}"
+                )));
+            };
+            frames.push(frame_record);
+        }
+        Ok(Some(assemble_replay(metadata, frames)))
     }
 
     pub fn get_replay_value(
@@ -132,16 +188,11 @@ impl ReplayDb {
             }
         }
 
-        let key = battle_id.to_string();
-        let Some(value) = self
-            .db
-            .get(key.as_bytes())
-            .map_err(|err| ReplayDbError::new(err.to_string()))?
-        else {
+        let Some(replay) = self.get_replay(battle_id)? else {
             return Ok(None);
         };
-
-        let parsed = decode_replay_value(value.as_ref())?;
+        let parsed =
+            serde_json::to_value(&replay).map_err(|err| ReplayDbError::new(err.to_string()))?;
         if let Some(cache) = self.replay_json_cache.as_ref() {
             cache
                 .lock()
@@ -158,6 +209,23 @@ impl ReplayDb {
         let Some(mut value) = self.get_replay_value(battle_id)? else {
             return Ok(None);
         };
+        sanitize_replay_value(&mut value);
+        Ok(Some(value))
+    }
+
+    pub fn get_replay_frame_value_lossy(
+        &self,
+        battle_id: u64,
+        frame: u32,
+    ) -> Result<Option<serde_json::Value>, ReplayDbError> {
+        let Some(metadata) = self.get_metadata_record(battle_id)? else {
+            return Ok(None);
+        };
+        let Some(frame_record) = self.get_frame_record(battle_id, frame)? else {
+            return Ok(None);
+        };
+        let mut value = serde_json::to_value(build_partial_replay(metadata, frame_record))
+            .map_err(|err| ReplayDbError::new(err.to_string()))?;
         sanitize_replay_value(&mut value);
         Ok(Some(value))
     }
@@ -190,18 +258,12 @@ impl ReplayDb {
 
         for battle_id in self.battle_ids.iter().copied() {
             if load_replay_summary(&self.summary_tree, battle_id)?.is_none() {
-                let key = battle_id.to_string();
-                let Some(value) = self
-                    .db
-                    .get(key.as_bytes())
-                    .map_err(|err| ReplayDbError::new(err.to_string()))?
-                else {
+                let Some(replay) = self.get_replay(battle_id)? else {
                     return Err(ReplayDbError::new(format!(
                         "battle_id {battle_id} disappeared from the replay DB"
                     )));
                 };
-
-                let summary = decode_replay_summary(value.as_ref())?;
+                let summary = ReplaySummary::from(&replay);
                 store_replay_summary(&self.summary_tree, battle_id, &summary)?;
                 self.summaries
                     .lock()
@@ -238,18 +300,12 @@ impl ReplayDb {
             return Ok(summary);
         }
 
-        let key = battle_id.to_string();
-        let Some(value) = self
-            .db
-            .get(key.as_bytes())
-            .map_err(|err| ReplayDbError::new(err.to_string()))?
-        else {
+        let Some(replay) = self.get_replay(battle_id)? else {
             return Err(ReplayDbError::new(format!(
                 "battle_id {battle_id} disappeared from the replay DB"
             )));
         };
-
-        let summary = decode_replay_summary(value.as_ref())?;
+        let summary = ReplaySummary::from(&replay);
         store_replay_summary(&self.summary_tree, battle_id, &summary)?;
         self.summaries
             .lock()
@@ -257,6 +313,97 @@ impl ReplayDb {
             .insert(battle_id, summary.clone());
         Ok(summary)
     }
+
+    fn clear_existing_frames(&self, battle_id: u64) -> Result<(), ReplayDbError> {
+        let Some(existing) = self.get_metadata_record(battle_id)? else {
+            return Ok(());
+        };
+        let mut batch = sled::Batch::default();
+        for frame in existing.snapshot_frames {
+            batch.remove(frame_key(battle_id, frame).into_bytes());
+        }
+        self.db
+            .apply_batch(batch)
+            .map_err(|err| ReplayDbError::new(err.to_string()))?;
+        Ok(())
+    }
+
+    fn get_metadata_record(
+        &self,
+        battle_id: u64,
+    ) -> Result<Option<ReplayMetadataRecord>, ReplayDbError> {
+        let Some(value) = self
+            .db
+            .get(metadata_key(battle_id).as_bytes())
+            .map_err(|err| ReplayDbError::new(err.to_string()))?
+        else {
+            return Ok(None);
+        };
+        decode_cbor(value.as_ref())
+            .map(Some)
+            .map_err(|err| ReplayDbError::new(err.to_string()))
+    }
+
+    fn get_frame_record(
+        &self,
+        battle_id: u64,
+        frame: u32,
+    ) -> Result<Option<ReplayFrameRecord>, ReplayDbError> {
+        let Some(value) = self
+            .db
+            .get(frame_key(battle_id, frame).as_bytes())
+            .map_err(|err| ReplayDbError::new(err.to_string()))?
+        else {
+            return Ok(None);
+        };
+        decode_cbor(value.as_ref())
+            .map(Some)
+            .map_err(|err| ReplayDbError::new(err.to_string()))
+    }
+}
+
+pub fn migrate_legacy_db(
+    src: impl AsRef<Path>,
+    dst: impl AsRef<Path>,
+) -> Result<(), ReplayDbError> {
+    let src = src.as_ref();
+    let dst = dst.as_ref();
+    if dst.exists() {
+        return Err(ReplayDbError::new(format!(
+            "destination DB path already exists: {}",
+            dst.display()
+        )));
+    }
+    fs::create_dir_all(dst).map_err(|err| ReplayDbError::new(err.to_string()))?;
+
+    let src_db = sled::open(src).map_err(|err| ReplayDbError::new(err.to_string()))?;
+    let dst_db = ReplayDb::open(dst)?;
+    let total = src_db
+        .iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|(key, _)| parse_metadata_key(key.as_ref()).is_some())
+        .count() as u64;
+    let pb = ProgressBar::new(total);
+    pb.set_message("migrating legacy replay DB");
+    let mut migrated = 0usize;
+
+    for entry in src_db.iter() {
+        let (key, value) = entry.map_err(|err| ReplayDbError::new(err.to_string()))?;
+        let Some(_) = parse_metadata_key(key.as_ref()) else {
+            continue;
+        };
+        let replay = decode_legacy_replay(value.as_ref())?;
+        dst_db.put_replay(&replay)?;
+        migrated += 1;
+        pb.inc(1);
+    }
+
+    if migrated == 0 {
+        pb.finish_and_clear();
+        return Err(ReplayDbError::new("source DB contained no legacy replay rows"));
+    }
+    pb.finish_with_message(format!("migrated {migrated} replay(s)"));
+    Ok(())
 }
 
 pub fn store_replay_summary(
@@ -264,7 +411,7 @@ pub fn store_replay_summary(
     battle_id: u64,
     summary: &ReplaySummary,
 ) -> Result<(), ReplayDbError> {
-    let key = battle_id.to_string();
+    let key = metadata_key(battle_id);
     let payload = serde_json::to_vec(summary).map_err(|err| ReplayDbError::new(err.to_string()))?;
     summary_tree
         .insert(key.as_bytes(), payload)
@@ -276,7 +423,7 @@ fn load_replay_summary(
     summary_tree: &sled::Tree,
     battle_id: u64,
 ) -> Result<Option<ReplaySummary>, ReplayDbError> {
-    let key = battle_id.to_string();
+    let key = metadata_key(battle_id);
     let Some(value) = summary_tree
         .get(key.as_bytes())
         .map_err(|err| ReplayDbError::new(err.to_string()))?
@@ -361,37 +508,19 @@ impl From<&ParsedReplay> for ReplaySummary {
                 .sum(),
             commands: replay.command_history.len(),
             events: replay.events.len(),
-            first_snapshot_frame: replay
-                .global_snapshots
-                .first()
-                .map(|snapshot| snapshot.frame),
-            last_snapshot_frame: replay
-                .global_snapshots
-                .last()
-                .map(|snapshot| snapshot.frame),
+            first_snapshot_frame: replay.global_snapshots.first().map(|snapshot| snapshot.frame),
+            last_snapshot_frame: replay.global_snapshots.last().map(|snapshot| snapshot.frame),
         }
     }
 }
 
-fn decode_replay(value: &[u8]) -> Result<ParsedReplay, ReplayDbError> {
+fn decode_legacy_replay(value: &[u8]) -> Result<ParsedReplay, ReplayDbError> {
     let decompressed =
         zstd::decode_all(value).map_err(|err| ReplayDbError::new(err.to_string()))?;
-    let parsed = serde_json::from_slice::<ParsedReplay>(&decompressed)
+    let mut parsed = serde_json::from_slice::<serde_json::Value>(&decompressed)
         .map_err(|err| ReplayDbError::new(err.to_string()))?;
-    Ok(parsed)
-}
-
-fn decode_replay_value(value: &[u8]) -> Result<serde_json::Value, ReplayDbError> {
-    let decompressed =
-        zstd::decode_all(value).map_err(|err| ReplayDbError::new(err.to_string()))?;
-    let parsed = serde_json::from_slice::<serde_json::Value>(&decompressed)
-        .map_err(|err| ReplayDbError::new(err.to_string()))?;
-    Ok(parsed)
-}
-
-fn decode_replay_summary(value: &[u8]) -> Result<ReplaySummary, ReplayDbError> {
-    let parsed = decode_replay_value(value)?;
-    Ok(ReplaySummary::from_value(&parsed))
+    sanitize_replay_value(&mut parsed);
+    serde_json::from_value(parsed).map_err(|err| ReplayDbError::new(err.to_string()))
 }
 
 fn replay_json_cache() -> Option<Arc<Mutex<LruCache<u64, Arc<serde_json::Value>>>>> {
@@ -400,6 +529,22 @@ fn replay_json_cache() -> Option<Arc<Mutex<LruCache<u64, Arc<serde_json::Value>>
         .and_then(|raw| raw.parse::<usize>().ok())
         .unwrap_or(DEFAULT_REPLAY_JSON_CACHE_SIZE);
     NonZeroUsize::new(size).map(|size| Arc::new(Mutex::new(LruCache::new(size))))
+}
+
+fn metadata_key(battle_id: u64) -> String {
+    battle_id.to_string()
+}
+
+fn frame_key(battle_id: u64, frame: u32) -> String {
+    format!("{battle_id}_frame_{frame}")
+}
+
+fn parse_metadata_key(key: &[u8]) -> Option<u64> {
+    let key = std::str::from_utf8(key).ok()?;
+    if key.contains("_frame_") {
+        return None;
+    }
+    key.parse::<u64>().ok()
 }
 
 fn sanitize_replay_value(value: &mut serde_json::Value) {
@@ -414,6 +559,14 @@ fn sanitize_replay_value(value: &mut serde_json::Value) {
     {
         for snapshots in allyteam_snapshots.values_mut() {
             sanitize_allyteam_snapshot_array(Some(snapshots));
+        }
+    }
+    if let Some(economy_snapshots) = object
+        .get_mut("economy_snapshots")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for snapshots in economy_snapshots.values_mut() {
+            sanitize_economy_snapshot_array(Some(snapshots));
         }
     }
     sanitize_command_array(object.get_mut("command_history"));
@@ -467,6 +620,26 @@ fn sanitize_allyteam_snapshot_array(value: Option<&mut serde_json::Value>) {
         {
             for contact in contacts {
                 sanitize_radar_contact_value(contact);
+            }
+        }
+    }
+}
+
+fn sanitize_economy_snapshot_array(value: Option<&mut serde_json::Value>) {
+    let Some(items) = value.and_then(serde_json::Value::as_array_mut) else {
+        return;
+    };
+    for item in items {
+        let Some(object) = item.as_object_mut() else {
+            continue;
+        };
+        sanitize_required_float(object.get_mut("game_seconds"));
+        if let Some(economy) = object
+            .get_mut("economy")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for value in economy.values_mut() {
+                sanitize_required_float(Some(value));
             }
         }
     }
@@ -590,11 +763,11 @@ fn sanitize_required_float(value: Option<&mut serde_json::Value>) {
 
 #[cfg(test)]
 mod tests {
-    use super::ReplayDb;
+    use super::{migrate_legacy_db, ReplayDb};
     use crate::parse::{
-        AllyTeamSnapshotRecord, CommandOptionFlags, CommandRecord, DecodedCommand, EventRecord,
-        MapSize, ParsedReplay, PlayerMetadata, RadarContact, SnapshotRecord, TeamMetadata,
-        UnitSnapshot,
+        AllyTeamSnapshotRecord, CommandOptionFlags, CommandRecord, DecodedCommand,
+        EconomySnapshot, EconomySnapshotRecord, EventRecord, MapSize, ParsedReplay,
+        PlayerMetadata, RadarContact, SnapshotRecord, TeamMetadata, UnitSnapshot,
     };
 
     fn sample_replay(battle_id: u64, first_frame: u32) -> ParsedReplay {
@@ -660,7 +833,34 @@ mod tests {
                 }],
             ))
             .collect(),
-            economy_snapshots: std::collections::BTreeMap::new(),
+            economy_snapshots: std::iter::once((
+                0,
+                vec![EconomySnapshotRecord {
+                    team_id: 0,
+                    allyteam_id: 0,
+                    frame: first_frame,
+                    game_seconds: 5.0,
+                    economy: EconomySnapshot {
+                        metal_income: 1.0,
+                        energy_income: 2.0,
+                        metal_stored: 3.0,
+                        energy_stored: 4.0,
+                        metal_storage: 5.0,
+                        energy_storage: 6.0,
+                        metal_pull: 7.0,
+                        energy_pull: 8.0,
+                        metal_expense: 9.0,
+                        energy_expense: 10.0,
+                        metal_share: 11.0,
+                        energy_share: 12.0,
+                        metal_sent: 13.0,
+                        energy_sent: 14.0,
+                        metal_received: 15.0,
+                        energy_received: 16.0,
+                    },
+                }],
+            ))
+            .collect(),
             command_history: vec![CommandRecord {
                 frame: first_frame,
                 game_seconds: 5.0,
@@ -700,15 +900,11 @@ mod tests {
     #[test]
     fn lists_battle_ids_in_numeric_order() -> Result<(), Box<dyn std::error::Error>> {
         let temp_dir = tempfile::tempdir()?;
-        let db = sled::open(temp_dir.path())?;
+        let replay_db = ReplayDb::open(temp_dir.path())?;
         for battle_id in [10_u64, 2_u64] {
-            let replay = sample_replay(battle_id, battle_id as u32);
-            let payload = serde_json::to_vec(&replay)?;
-            let compressed = zstd::encode_all(payload.as_slice(), 3)?;
-            db.insert(battle_id.to_string().as_bytes(), compressed)?;
+            replay_db.put_replay(&sample_replay(battle_id, battle_id as u32))?;
         }
-        db.flush()?;
-        drop(db);
+        drop(replay_db);
 
         let replay_db = ReplayDb::open(temp_dir.path())?;
         assert_eq!(replay_db.battle_ids(), &[2, 10]);
@@ -723,13 +919,9 @@ mod tests {
     #[test]
     fn gets_full_replay_by_battle_id() -> Result<(), Box<dyn std::error::Error>> {
         let temp_dir = tempfile::tempdir()?;
-        let db = sled::open(temp_dir.path())?;
-        let replay = sample_replay(42, 120);
-        let payload = serde_json::to_vec(&replay)?;
-        let compressed = zstd::encode_all(payload.as_slice(), 3)?;
-        db.insert(b"42", compressed)?;
-        db.flush()?;
-        drop(db);
+        let replay_db = ReplayDb::open(temp_dir.path())?;
+        replay_db.put_replay(&sample_replay(42, 120))?;
+        drop(replay_db);
 
         let replay_db = ReplayDb::open(temp_dir.path())?;
         let stored = replay_db.get_replay(42)?.expect("replay should exist");
@@ -739,134 +931,65 @@ mod tests {
     }
 
     #[test]
-    fn lists_summaries_even_when_deep_float_fields_are_null(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn filters_frame_keys_from_battle_listing() -> Result<(), Box<dyn std::error::Error>> {
         let temp_dir = tempfile::tempdir()?;
-        let db = sled::open(temp_dir.path())?;
-        let replay = serde_json::json!({
-            "battle_id": 77,
-            "replay_filename": "77.sdfz",
-            "game_version": "1.0",
-            "engine_version": "105.1",
-            "map_name": "TestMap",
-            "game_name": "Zero-K v1.0",
-            "players": [{"player_id": 1}],
-            "teams": [{"team_id": 0}],
-            "map_size": {"x": 16, "z": 16},
-            "global_snapshots": [{
-                "frame": 120,
-                "game_seconds": 5.0,
-                "units": [{
-                    "unit_id": 1,
-                    "unit_def_name": "cloakcon",
-                    "team_id": 0,
-                    "allyteam_id": 0,
-                    "x": null,
-                    "y": 2.0,
-                    "z": 3.0,
-                    "hp": 100.0,
-                    "max_hp": 100.0,
-                    "build_progress": 1.0,
-                    "heading": 0,
-                    "experience": 0.0
-                }]
-            }],
-            "allyteam_snapshots": {"0": []},
-            "command_history": [],
-            "events": [],
-            "springie_stats": []
-        });
-        let payload = serde_json::to_vec(&replay)?;
-        let compressed = zstd::encode_all(payload.as_slice(), 3)?;
-        db.insert(b"77", compressed)?;
-        db.flush()?;
-        drop(db);
+        let replay_db = ReplayDb::open(temp_dir.path())?;
+        replay_db.put_replay(&sample_replay(42, 120))?;
+        drop(replay_db);
 
         let replay_db = ReplayDb::open(temp_dir.path())?;
-        let page = replay_db.list_replay_summaries(0, 10)?;
-        assert_eq!(page.items.len(), 1);
-        assert_eq!(page.items[0].battle_id, 77);
-        assert_eq!(page.items[0].global_snapshots, 1);
+        assert_eq!(replay_db.battle_ids(), &[42]);
         Ok(())
     }
 
     #[test]
-    fn gets_lossy_replay_json_when_required_float_fields_are_null(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn loads_lossy_frame_lookup() -> Result<(), Box<dyn std::error::Error>> {
         let temp_dir = tempfile::tempdir()?;
-        let db = sled::open(temp_dir.path())?;
-        let replay = serde_json::json!({
-            "battle_id": 88,
-            "replay_filename": "88.sdfz",
-            "game_version": "1.0",
-            "engine_version": "105.1",
-            "map_name": "TestMap",
-            "game_name": "Zero-K v1.0",
-            "players": [],
-            "teams": [],
-            "map_size": {"x": 16, "z": 16},
-            "global_snapshots": [{
-                "frame": 120,
-                "game_seconds": null,
-                "units": [{
-                    "unit_id": 1,
-                    "unit_def_name": "cloakcon",
-                    "team_id": 0,
-                    "allyteam_id": 0,
-                    "x": null,
-                    "y": null,
-                    "z": 3.0,
-                    "hp": null,
-                    "max_hp": 100.0,
-                    "build_progress": null,
-                    "heading": 0,
-                    "experience": null
-                }]
-            }],
-            "allyteam_snapshots": {"0": [{
-                "allyteam_id": 0,
-                "frame": 120,
-                "game_seconds": null,
-                "los_units": [],
-                "radar_contacts": [{"unit_id": 2, "team_id": 1, "allyteam_id": 1, "x": null, "y": 5.0, "z": null}]
-            }]},
-            "command_history": [{
-                "frame": 120,
-                "game_seconds": null,
-                "player_id": 1,
-                "ai_id": null,
-                "command_id": 10,
-                "options": 0,
-                "params": [null, 2.0],
-                "selected_unit_ids": [1],
-                "decoded": {
-                    "kind": "move",
-                    "option_flags": {"alt": false, "ctrl": false, "meta": false, "shift": false, "right": false, "internal": false},
-                    "target": {"type": "Position", "x": null, "y": 2.0, "z": null},
-                    "state": null,
-                    "build": null,
-                    "inserted": null,
-                    "removed": null
-                }
-            }],
-            "events": [{"event_type": "test", "frame": 120, "game_seconds": null, "payload": {}}],
-            "springie_stats": []
-        });
+        let replay_db = ReplayDb::open(temp_dir.path())?;
+        replay_db.put_replay(&sample_replay(42, 120))?;
+
+        let replay = replay_db
+            .get_replay_frame_value_lossy(42, 120)?
+            .expect("frame should exist");
+        assert_eq!(replay["global_snapshots"][0]["frame"], 120);
+        assert_eq!(replay["allyteam_snapshots"]["0"][0]["frame"], 120);
+        assert_eq!(replay["economy_snapshots"]["0"][0]["frame"], 120);
+        Ok(())
+    }
+
+    #[test]
+    fn migrates_legacy_replay_rows() -> Result<(), Box<dyn std::error::Error>> {
+        let src_dir = tempfile::tempdir()?;
+        let dst_dir = tempfile::tempdir()?;
+        let legacy_db = sled::open(src_dir.path())?;
+        let replay = sample_replay(88, 240);
         let payload = serde_json::to_vec(&replay)?;
         let compressed = zstd::encode_all(payload.as_slice(), 3)?;
-        db.insert(b"88", compressed)?;
-        db.flush()?;
-        drop(db);
+        legacy_db.insert(b"88", compressed)?;
+        legacy_db.flush()?;
+        drop(legacy_db);
 
+        let dst_path = dst_dir.path().join("migrated");
+        migrate_legacy_db(src_dir.path(), &dst_path)?;
+        let replay_db = ReplayDb::open(&dst_path)?;
+        let replay = replay_db.get_replay(88)?.expect("migrated replay should exist");
+        assert_eq!(replay.battle_id, 88);
+        assert_eq!(replay.global_snapshots[0].frame, 240);
+        Ok(())
+    }
+
+    #[test]
+    fn loads_lossy_replay_values() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
         let replay_db = ReplayDb::open(temp_dir.path())?;
+        replay_db.put_replay(&sample_replay(88, 120))?;
+
         let replay = replay_db
             .get_replay_value_lossy(88)?
             .expect("replay should exist");
-        assert_eq!(replay["global_snapshots"][0]["game_seconds"], 0.0);
-        assert_eq!(replay["global_snapshots"][0]["units"][0]["x"], 0.0);
-        assert_eq!(replay["command_history"][0]["params"][0], 0.0);
-        assert_eq!(replay["command_history"][0]["decoded"]["target"]["x"], 0.0);
-        assert_eq!(replay["events"][0]["game_seconds"], 0.0);
+        assert_eq!(replay["global_snapshots"][0]["game_seconds"], 5.0);
+        assert_eq!(replay["global_snapshots"][0]["units"][0]["x"], 1.0);
+        assert_eq!(replay["command_history"][0]["params"][0], 10.0);
         Ok(())
     }
 }

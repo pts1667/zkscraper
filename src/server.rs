@@ -61,6 +61,12 @@ pub struct ReplayListQuery {
     pub limit: Option<usize>,
 }
 
+#[derive(Debug, Clone, Deserialize, IntoParams, Serialize, ToSchema)]
+pub struct ReplayQuery {
+    #[serde(default)]
+    pub snapshot_frame: Option<u32>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct HealthResponse {
     pub status: String,
@@ -126,6 +132,7 @@ impl IntoResponse for ApiError {
         ApiErrorBody,
         HealthResponse,
         ReplayListQuery,
+        ReplayQuery,
         ReplayListResponse,
         ReplaySummary,
         MapListResponse,
@@ -236,6 +243,7 @@ async fn list_replays(
 #[fastapi::path(
     get,
     path = "/replays/{battle_id}",
+    params(ReplayQuery),
     responses(
         (status = 200, description = "Full replay record", body = ParsedReplay),
         (status = 404, description = "Replay not found", body = ApiErrorBody),
@@ -248,16 +256,23 @@ async fn list_replays(
 async fn get_replay(
     State(state): State<AppState>,
     Path(battle_id): Path<u64>,
+    Query(query): Query<ReplayQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let db = state.db.clone();
-    let replay = tokio::task::spawn_blocking(move || db.get_replay_value_lossy(battle_id))
-        .await
-        .map_err(|err| ApiError::internal(format!("replay read task failed: {err}")))?
-        .map_err(|err| ApiError::internal(format!("failed to read replay {battle_id}: {err}")))?;
+    let replay = tokio::task::spawn_blocking(move || match query.snapshot_frame {
+        Some(snapshot_frame) => db.get_replay_frame_value_lossy(battle_id, snapshot_frame),
+        None => db.get_replay_value_lossy(battle_id),
+    })
+    .await
+    .map_err(|err| ApiError::internal(format!("replay read task failed: {err}")))?
+    .map_err(|err| ApiError::internal(format!("failed to read replay {battle_id}: {err}")))?;
 
-    match replay {
-        Some(replay) => Ok(Json(replay)),
-        None => Err(ApiError::not_found(format!(
+    match (replay, query.snapshot_frame) {
+        (Some(replay), _) => Ok(Json(replay)),
+        (None, Some(snapshot_frame)) => Err(ApiError::not_found(format!(
+            "battle_id {battle_id} has no snapshot at frame {snapshot_frame}"
+        ))),
+        (None, None) => Err(ApiError::not_found(format!(
             "battle_id {battle_id} not found"
         ))),
     }
@@ -380,9 +395,9 @@ mod tests {
         db::ReplayDb,
         map_assets::MapService,
         parse::{
-            AllyTeamSnapshotRecord, CommandOptionFlags, CommandRecord, DecodedCommand, EventRecord,
-            MapSize, ParsedReplay, PlayerMetadata, RadarContact, SnapshotRecord, TeamMetadata,
-            UnitSnapshot,
+            AllyTeamSnapshotRecord, CommandOptionFlags, CommandRecord, DecodedCommand,
+            EconomySnapshot, EconomySnapshotRecord, EventRecord, MapSize, ParsedReplay,
+            PlayerMetadata, RadarContact, SnapshotRecord, TeamMetadata, UnitSnapshot,
         },
     };
 
@@ -413,43 +428,138 @@ mod tests {
                 handicap: Some(0.0),
             }],
             map_size: Some(MapSize { x: 16, z: 16 }),
-            global_snapshots: vec![SnapshotRecord {
-                frame: 120,
-                game_seconds: 5.0,
-                units: vec![UnitSnapshot {
-                    unit_id: 1,
-                    unit_def_name: "cloakcon".to_string(),
-                    team_id: 0,
-                    allyteam_id: 0,
-                    x: 1.0,
-                    y: 2.0,
-                    z: 3.0,
-                    hp: 100.0,
-                    max_hp: 100.0,
-                    build_progress: 1.0,
-                    heading: 0,
-                    experience: 0.0,
-                }],
-            }],
-            allyteam_snapshots: std::iter::once((
-                0,
-                vec![AllyTeamSnapshotRecord {
-                    allyteam_id: 0,
+            global_snapshots: vec![
+                SnapshotRecord {
                     frame: 120,
                     game_seconds: 5.0,
-                    los_units: vec![],
-                    radar_contacts: vec![RadarContact {
-                        unit_id: 2,
-                        team_id: 1,
-                        allyteam_id: 1,
-                        x: 4.0,
-                        y: 5.0,
-                        z: 6.0,
+                    units: vec![UnitSnapshot {
+                        unit_id: 1,
+                        unit_def_name: "cloakcon".to_string(),
+                        team_id: 0,
+                        allyteam_id: 0,
+                        x: 1.0,
+                        y: 2.0,
+                        z: 3.0,
+                        hp: 100.0,
+                        max_hp: 100.0,
+                        build_progress: 1.0,
+                        heading: 0,
+                        experience: 0.0,
                     }],
-                }],
+                },
+                SnapshotRecord {
+                    frame: 240,
+                    game_seconds: 10.0,
+                    units: vec![UnitSnapshot {
+                        unit_id: 3,
+                        unit_def_name: "cloakraid".to_string(),
+                        team_id: 0,
+                        allyteam_id: 0,
+                        x: 7.0,
+                        y: 8.0,
+                        z: 9.0,
+                        hp: 90.0,
+                        max_hp: 100.0,
+                        build_progress: 1.0,
+                        heading: 128,
+                        experience: 1.0,
+                    }],
+                },
+            ],
+            allyteam_snapshots: std::iter::once((
+                0,
+                vec![
+                    AllyTeamSnapshotRecord {
+                        allyteam_id: 0,
+                        frame: 120,
+                        game_seconds: 5.0,
+                        los_units: vec![],
+                        radar_contacts: vec![RadarContact {
+                            unit_id: 2,
+                            team_id: 1,
+                            allyteam_id: 1,
+                            x: 4.0,
+                            y: 5.0,
+                            z: 6.0,
+                        }],
+                    },
+                    AllyTeamSnapshotRecord {
+                        allyteam_id: 0,
+                        frame: 240,
+                        game_seconds: 10.0,
+                        los_units: vec![UnitSnapshot {
+                            unit_id: 3,
+                            unit_def_name: "cloakraid".to_string(),
+                            team_id: 0,
+                            allyteam_id: 0,
+                            x: 7.0,
+                            y: 8.0,
+                            z: 9.0,
+                            hp: 90.0,
+                            max_hp: 100.0,
+                            build_progress: 1.0,
+                            heading: 128,
+                            experience: 1.0,
+                        }],
+                        radar_contacts: vec![],
+                    },
+                ],
             ))
             .collect(),
-            economy_snapshots: std::collections::BTreeMap::new(),
+            economy_snapshots: std::iter::once((
+                0,
+                vec![
+                    EconomySnapshotRecord {
+                        team_id: 0,
+                        allyteam_id: 0,
+                        frame: 120,
+                        game_seconds: 5.0,
+                        economy: EconomySnapshot {
+                            metal_income: 1.0,
+                            energy_income: 2.0,
+                            metal_stored: 3.0,
+                            energy_stored: 4.0,
+                            metal_storage: 5.0,
+                            energy_storage: 6.0,
+                            metal_pull: 7.0,
+                            energy_pull: 8.0,
+                            metal_expense: 9.0,
+                            energy_expense: 10.0,
+                            metal_share: 11.0,
+                            energy_share: 12.0,
+                            metal_sent: 13.0,
+                            energy_sent: 14.0,
+                            metal_received: 15.0,
+                            energy_received: 16.0,
+                        },
+                    },
+                    EconomySnapshotRecord {
+                        team_id: 0,
+                        allyteam_id: 0,
+                        frame: 240,
+                        game_seconds: 10.0,
+                        economy: EconomySnapshot {
+                            metal_income: 2.0,
+                            energy_income: 3.0,
+                            metal_stored: 4.0,
+                            energy_stored: 5.0,
+                            metal_storage: 6.0,
+                            energy_storage: 7.0,
+                            metal_pull: 8.0,
+                            energy_pull: 9.0,
+                            metal_expense: 10.0,
+                            energy_expense: 11.0,
+                            metal_share: 12.0,
+                            energy_share: 13.0,
+                            metal_sent: 14.0,
+                            energy_sent: 15.0,
+                            metal_received: 16.0,
+                            energy_received: 17.0,
+                        },
+                    },
+                ],
+            ))
+            .collect(),
             command_history: vec![CommandRecord {
                 frame: 120,
                 game_seconds: 5.0,
@@ -538,16 +648,12 @@ mod tests {
     ) -> Result<axum::Router, Box<dyn std::error::Error + Send + Sync>> {
         let temp_dir = tempfile::tempdir()?;
         let temp_path = temp_dir.keep();
-        let db = sled::open(&temp_path)?;
+        let replay_db = ReplayDb::open(&temp_path)?;
         for battle_id in [10_u64, 2_u64] {
             let replay = sample_replay(battle_id);
-            let payload = serde_json::to_vec(&replay)?;
-            let compressed = zstd::encode_all(payload.as_slice(), 3)?;
-            db.insert(battle_id.to_string().as_bytes(), compressed)?;
+            replay_db.put_replay(&replay)?;
         }
-        db.flush()?;
-        drop(db);
-
+        drop(replay_db);
         let replay_db = ReplayDb::open(&temp_path)?;
         let maps = if with_maps {
             write_test_archive(&temp_path)?;
@@ -593,6 +699,46 @@ mod tests {
         let app = seeded_router(false)?;
         let response = app
             .oneshot(Request::builder().uri("/replays/999").body(Body::empty())?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replay_lookup_can_filter_to_specific_snapshot_frame(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let app = seeded_router(false)?;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/replays/2?snapshot_frame=240")
+                    .body(Body::empty())?,
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await?;
+        let parsed: serde_json::Value = serde_json::from_slice(&body)?;
+        assert_eq!(parsed["global_snapshots"].as_array().unwrap().len(), 1);
+        assert_eq!(parsed["global_snapshots"][0]["frame"], 240);
+        assert_eq!(parsed["allyteam_snapshots"]["0"].as_array().unwrap().len(), 1);
+        assert_eq!(parsed["allyteam_snapshots"]["0"][0]["frame"], 240);
+        assert_eq!(parsed["economy_snapshots"]["0"].as_array().unwrap().len(), 1);
+        assert_eq!(parsed["economy_snapshots"]["0"][0]["frame"], 240);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replay_lookup_returns_404_for_missing_snapshot_frame(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let app = seeded_router(false)?;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/replays/2?snapshot_frame=999")
+                    .body(Body::empty())?,
+            )
             .await?;
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);

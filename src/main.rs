@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use std::error::Error;
 use std::path::PathBuf;
 use url::Url;
-use zkscraper::{fetch, gather, maps, parse, pipeline};
+use zkscraper::{db, fetch, gather, maps, parse, pipeline};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -120,6 +120,18 @@ enum Commands {
         #[arg(long)]
         zk_path: Option<PathBuf>,
     },
+
+    /// Migrate a legacy zstd+JSON replay DB into the new CBOR metadata/frame layout
+    #[command(name = "migrate-db")]
+    MigrateDb {
+        /// Source sled DB directory in the legacy format
+        #[arg(long)]
+        src: PathBuf,
+
+        /// Destination sled DB directory to create in the new format
+        #[arg(long)]
+        dst: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -204,5 +216,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             snapshot_path,
             zk_path,
         } => parse::backfill_commands(sdfz_in, snapshot_path, zk_path).await,
+        Commands::MigrateDb { src, dst } => db::migrate_legacy_db(src, dst).map_err(Into::into),
     }
 }

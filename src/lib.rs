@@ -7,3 +7,4 @@ pub mod maps;
 pub mod parse;
 pub mod pipeline;
 pub mod server;
+pub mod storage;
