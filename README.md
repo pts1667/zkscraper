@@ -202,6 +202,12 @@ Available endpoints:
 - `GET /maps/{map_name}/heightmap.bmp`
 - `GET /maps/{map_name}/features`
 
+Response formats:
+
+- replay and map-data endpoints now return `application/cbor`
+- `GET /maps/{map_name}/heightmap.bmp` still returns `image/bmp`
+- `GET /openapi.json` remains JSON and `GET /docs` remains HTML
+
 Map asset behavior:
 
 - `--zk-path` points at a Zero-K portable install and serves archives from `<zk_path>\maps`

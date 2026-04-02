@@ -5,7 +5,7 @@ use axum::{
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::get,
-    Json, Router,
+    Router,
 };
 use fastapi::{IntoParams, OpenApi, ToSchema};
 use serde::{Deserialize, Serialize};
@@ -116,11 +116,34 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (
             self.status,
-            Json(ApiErrorBody {
+            Cbor(ApiErrorBody {
                 error: self.message,
             }),
         )
             .into_response()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Cbor<T>(T);
+
+impl<T> IntoResponse for Cbor<T>
+where
+    T: Serialize,
+{
+    fn into_response(self) -> Response {
+        match minicbor_serde::to_vec(&self.0) {
+            Ok(bytes) => {
+                let mut headers = HeaderMap::new();
+                headers.insert(header::CONTENT_TYPE, "application/cbor".parse().unwrap());
+                (headers, bytes).into_response()
+            }
+            Err(err) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to encode cbor response: {err}"),
+            )
+                .into_response(),
+        }
     }
 }
 
@@ -172,9 +195,11 @@ impl IntoResponse for ApiError {
 struct ApiDoc;
 
 pub fn app_state(db: ReplayDb, maps: Option<MapService>) -> AppState {
-    let openapi_json = ApiDoc::openapi()
-        .to_pretty_json()
+    let mut openapi_value = serde_json::to_value(ApiDoc::openapi())
         .expect("failed to serialize openapi document");
+    rewrite_openapi_to_cbor(&mut openapi_value);
+    let openapi_json =
+        serde_json::to_string_pretty(&openapi_value).expect("failed to serialize openapi json");
 
     AppState {
         db,
@@ -214,8 +239,8 @@ pub async fn serve(
         (status = 200, description = "Server is healthy", body = HealthResponse)
     )
 )]
-async fn healthz() -> Json<HealthResponse> {
-    Json(HealthResponse {
+async fn healthz() -> Cbor<HealthResponse> {
+    Cbor(HealthResponse {
         status: "ok".to_string(),
     })
 }
@@ -233,7 +258,7 @@ async fn healthz() -> Json<HealthResponse> {
 async fn list_replays(
     State(state): State<AppState>,
     Query(query): Query<ReplayListQuery>,
-) -> Result<Json<ReplayListResponse>, ApiError> {
+) -> Result<Cbor<ReplayListResponse>, ApiError> {
     let offset = query.offset.unwrap_or(0);
     let raw_limit = query.limit.unwrap_or(DEFAULT_LIMIT);
     if raw_limit == 0 {
@@ -246,7 +271,7 @@ async fn list_replays(
         .map_err(|err| ApiError::internal(format!("replay list task failed: {err}")))?
         .map_err(|err| ApiError::internal(format!("failed to list replays: {err}")))?;
 
-    Ok(Json(page))
+    Ok(Cbor(page))
 }
 
 #[fastapi::path(
@@ -266,7 +291,7 @@ async fn get_replay(
     State(state): State<AppState>,
     Path(battle_id): Path<u64>,
     Query(query): Query<ReplayQuery>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Cbor<serde_json::Value>, ApiError> {
     let db = state.db.clone();
     let replay = tokio::task::spawn_blocking(move || match query.snapshot_frame {
         Some(snapshot_frame) => db.get_replay_frame_value_lossy(battle_id, snapshot_frame),
@@ -277,7 +302,7 @@ async fn get_replay(
     .map_err(|err| ApiError::internal(format!("failed to read replay {battle_id}: {err}")))?;
 
     match (replay, query.snapshot_frame) {
-        (Some(replay), _) => Ok(Json(replay)),
+        (Some(replay), _) => Ok(Cbor(replay)),
         (None, Some(snapshot_frame)) => Err(ApiError::not_found(format!(
             "battle_id {battle_id} has no snapshot at frame {snapshot_frame}"
         ))),
@@ -302,7 +327,7 @@ async fn get_replay(
 async fn get_replay_frames(
     State(state): State<AppState>,
     Path(battle_id): Path<u64>,
-) -> Result<Json<ReplayFramesResponse>, ApiError> {
+) -> Result<Cbor<ReplayFramesResponse>, ApiError> {
     let db = state.db.clone();
     let frames = tokio::task::spawn_blocking(move || db.get_replay_frames(battle_id))
         .await
@@ -310,7 +335,7 @@ async fn get_replay_frames(
         .map_err(|err| ApiError::internal(format!("failed to read replay frames {battle_id}: {err}")))?;
 
     match frames {
-        Some(frames) => Ok(Json(ReplayFramesResponse { battle_id, frames })),
+        Some(frames) => Ok(Cbor(ReplayFramesResponse { battle_id, frames })),
         None => Err(ApiError::not_found(format!(
             "battle_id {battle_id} not found"
         ))),
@@ -326,7 +351,7 @@ async fn get_replay_frames(
         (status = 500, description = "Map list read failed", body = ApiErrorBody)
     )
 )]
-async fn list_maps(State(state): State<AppState>) -> Result<Json<MapListResponse>, ApiError> {
+async fn list_maps(State(state): State<AppState>) -> Result<Cbor<MapListResponse>, ApiError> {
     let maps = state.maps.clone().ok_or_else(|| ApiError {
         status: StatusCode::SERVICE_UNAVAILABLE,
         message: "map serving is unavailable without --zk-path".to_string(),
@@ -336,7 +361,7 @@ async fn list_maps(State(state): State<AppState>) -> Result<Json<MapListResponse
         .map_err(|err| ApiError::internal(format!("map list task failed: {err}")))?
         .map_err(|err| ApiError::internal(format!("failed to list maps: {err}")))?;
 
-    Ok(Json(response))
+    Ok(Cbor(response))
 }
 
 #[fastapi::path(
@@ -387,7 +412,7 @@ async fn get_map_heightmap(
 async fn get_map_features(
     State(state): State<AppState>,
     Path(map_name): Path<String>,
-) -> Result<Json<MapFeaturesResponse>, ApiError> {
+) -> Result<Cbor<MapFeaturesResponse>, ApiError> {
     let maps = state.maps.clone().ok_or_else(|| ApiError {
         status: StatusCode::SERVICE_UNAVAILABLE,
         message: "map serving is unavailable without --zk-path".to_string(),
@@ -398,7 +423,7 @@ async fn get_map_features(
         .map_err(|err| ApiError::internal(format!("map feature task failed: {err}")))?
         .map_err(|err| map_asset_error(&map_name, err))?;
 
-    Ok(Json(features))
+    Ok(Cbor(features))
 }
 
 async fn openapi_json(State(state): State<AppState>) -> Response {
@@ -420,11 +445,41 @@ fn map_asset_error(map_name: &str, err: impl std::fmt::Display) -> ApiError {
     }
 }
 
+fn rewrite_openapi_to_cbor(value: &mut serde_json::Value) {
+    let Some(paths) = value.get_mut("paths").and_then(serde_json::Value::as_object_mut) else {
+        return;
+    };
+    for path_item in paths.values_mut() {
+        let Some(operations) = path_item.as_object_mut() else {
+            continue;
+        };
+        for operation in operations.values_mut() {
+            let Some(responses) = operation
+                .get_mut("responses")
+                .and_then(serde_json::Value::as_object_mut)
+            else {
+                continue;
+            };
+            for response in responses.values_mut() {
+                let Some(content) = response
+                    .get_mut("content")
+                    .and_then(serde_json::Value::as_object_mut)
+                else {
+                    continue;
+                };
+                if let Some(json_content) = content.remove("application/json") {
+                    content.insert("application/cbor".to_string(), json_content);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use axum::{
         body::{to_bytes, Body},
-        http::{Request, StatusCode},
+        http::{header, Request, StatusCode},
     };
     use std::io::Write;
     use tower::ServiceExt;
@@ -439,6 +494,12 @@ mod tests {
             PlayerMetadata, RadarContact, SnapshotRecord, TeamMetadata, UnitSnapshot,
         },
     };
+
+    fn decode_cbor_body<T: serde::de::DeserializeOwned>(
+        body: &[u8],
+    ) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {
+        minicbor_serde::from_slice(body).map_err(|err| err.into())
+    }
 
     fn sample_replay(battle_id: u64) -> ParsedReplay {
         ParsedReplay {
@@ -711,6 +772,10 @@ mod tests {
             .await?;
 
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/cbor"
+        );
         Ok(())
     }
 
@@ -728,7 +793,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await?;
-        let parsed: serde_json::Value = serde_json::from_slice(&body)?;
+        let parsed: serde_json::Value = decode_cbor_body(&body)?;
         assert_eq!(parsed["items"][0]["battle_id"], 2);
         Ok(())
     }
@@ -758,7 +823,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await?;
-        let parsed: serde_json::Value = serde_json::from_slice(&body)?;
+        let parsed: serde_json::Value = decode_cbor_body(&body)?;
         assert_eq!(parsed["battle_id"], 2);
         assert_eq!(parsed["frames"], serde_json::json!([120, 240]));
         Ok(())
@@ -777,8 +842,12 @@ mod tests {
             .await?;
 
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/cbor"
+        );
         let body = to_bytes(response.into_body(), usize::MAX).await?;
-        let parsed: serde_json::Value = serde_json::from_slice(&body)?;
+        let parsed: serde_json::Value = decode_cbor_body(&body)?;
         assert_eq!(parsed["global_snapshots"].as_array().unwrap().len(), 1);
         assert_eq!(parsed["global_snapshots"][0]["frame"], 240);
         assert_eq!(parsed["allyteam_snapshots"]["0"].as_array().unwrap().len(), 1);
@@ -865,7 +934,7 @@ mod tests {
             .await?;
         assert_eq!(features_response.status(), StatusCode::OK);
         let body = to_bytes(features_response.into_body(), usize::MAX).await?;
-        let parsed: serde_json::Value = serde_json::from_slice(&body)?;
+        let parsed: serde_json::Value = decode_cbor_body(&body)?;
         assert_eq!(parsed["metal_spots"][0]["x"], 100.0);
         assert_eq!(parsed["features"][0]["name"], "treetype1");
         Ok(())
@@ -881,7 +950,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await?;
-        let parsed: serde_json::Value = serde_json::from_slice(&body)?;
+        let parsed: serde_json::Value = decode_cbor_body(&body)?;
         let items = parsed["items"]
             .as_array()
             .expect("items should be an array");
