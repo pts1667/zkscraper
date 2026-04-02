@@ -78,7 +78,7 @@ pub struct ReplayListResponse {
 
 impl ReplayDb {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ReplayDbError> {
-        let db = sled::open(path).map_err(|err| ReplayDbError::new(err.to_string()))?;
+        let db = open_compressed_db(path)?;
         let summary_tree = db
             .open_tree(REPLAY_SUMMARY_TREE)
             .map_err(|err| ReplayDbError::new(err.to_string()))?;
@@ -360,6 +360,15 @@ impl ReplayDb {
             .map(Some)
             .map_err(|err| ReplayDbError::new(err.to_string()))
     }
+}
+
+fn open_compressed_db(path: impl AsRef<Path>) -> Result<sled::Db, ReplayDbError> {
+    sled::Config::default()
+        .path(path)
+        .use_compression(true)
+        .compression_factor(5)
+        .open()
+        .map_err(|err| ReplayDbError::new(err.to_string()))
 }
 
 pub fn migrate_legacy_db(

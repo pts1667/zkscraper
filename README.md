@@ -121,7 +121,7 @@ battle_id,replay_filename,game_version
 
 ## 4. Parse Replays
 
-This runs Zero-K headless and stores parsed replays in a `sled` DB using CBOR:
+This runs Zero-K headless and stores parsed replays in a `sled` DB using CBOR, with `sled`'s built-in `zstd` compression enabled:
 
 - key `<battle_id>` stores replay metadata, commands, events, and a frame index
 - key `<battle_id>_frame_<frame>` stores the snapshots for that exact frame
@@ -235,7 +235,7 @@ cargo run --release --bin zkscraper -- migrate-db `
 Behavior:
 
 - reads only the legacy top-level battle rows from `--src`
-- writes the new CBOR metadata/frame layout to `--dst`
+- writes the new CBOR metadata/frame layout to `--dst` with `sled` compression enabled
 - rebuilds replay summaries in the destination DB
 - refuses to write into an existing destination path
 
@@ -383,4 +383,4 @@ If `pipeline` fails:
 If you want to inspect stored replay records directly:
 
 - use the `reader` binary first
-- the DB values are CBOR stored in `sled`
+- the DB values are CBOR stored in `sled`, with `sled` applying `zstd` compression at the DB level
