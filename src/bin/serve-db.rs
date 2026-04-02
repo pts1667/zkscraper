@@ -31,7 +31,6 @@ struct Args {
 async fn main() -> std::io::Result<()> {
     let args = Args::parse();
     let db = ReplayDb::open(&args.db).map_err(std::io::Error::other)?;
-    let generated = db.build_summary_index().map_err(std::io::Error::other)?;
     let maps = args
         .zk_path
         .as_deref()
@@ -42,7 +41,6 @@ async fn main() -> std::io::Result<()> {
         .parse()
         .map_err(std::io::Error::other)?;
 
-    println!("Summary index generated for {generated} replay(s)");
     println!("Serving replay DB on http://{bind_addr}");
     println!("OpenAPI JSON: http://{bind_addr}/openapi.json");
     println!("Docs: http://{bind_addr}/docs");

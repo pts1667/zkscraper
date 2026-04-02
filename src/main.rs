@@ -132,6 +132,14 @@ enum Commands {
         #[arg(long)]
         dst: PathBuf,
     },
+
+    /// Refresh replay metadata counters for the new DB layout and delete any legacy summaries tree
+    #[command(name = "refresh-db")]
+    RefreshDb {
+        /// Existing sled DB directory in the new format
+        #[arg(long)]
+        db: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -217,5 +225,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             zk_path,
         } => parse::backfill_commands(sdfz_in, snapshot_path, zk_path).await,
         Commands::MigrateDb { src, dst } => db::migrate_legacy_db(src, dst).map_err(Into::into),
+        Commands::RefreshDb { db: db_path } => {
+            let db = db::ReplayDb::open(db_path)?;
+            db.refresh_metadata().map(|_| ()).map_err(Into::into)
+        }
     }
 }

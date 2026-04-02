@@ -40,6 +40,16 @@ pub struct ReplayMetadataRecord {
     pub events: Vec<EventRecord>,
     pub springie_stats: Vec<String>,
     pub snapshot_frames: Vec<u32>,
+    #[serde(default)]
+    pub global_snapshot_count: usize,
+    #[serde(default)]
+    pub allyteam_snapshot_streams: usize,
+    #[serde(default)]
+    pub allyteam_snapshot_frames: usize,
+    #[serde(default)]
+    pub first_snapshot_frame: Option<u32>,
+    #[serde(default)]
+    pub last_snapshot_frame: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,6 +127,15 @@ pub fn split_replay(replay: &ParsedReplay) -> (ReplayMetadataRecord, Vec<ReplayF
             events: replay.events.clone(),
             springie_stats: replay.springie_stats.clone(),
             snapshot_frames,
+            global_snapshot_count: replay.global_snapshots.len(),
+            allyteam_snapshot_streams: replay.allyteam_snapshots.len(),
+            allyteam_snapshot_frames: replay
+                .allyteam_snapshots
+                .values()
+                .map(|snapshots| snapshots.len())
+                .sum(),
+            first_snapshot_frame: replay.global_snapshots.first().map(|snapshot| snapshot.frame),
+            last_snapshot_frame: replay.global_snapshots.last().map(|snapshot| snapshot.frame),
         },
         frame_map.into_values().collect(),
     )

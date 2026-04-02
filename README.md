@@ -196,6 +196,7 @@ Available endpoints:
 - `GET /healthz`
 - `GET /replays?offset=0&limit=100`
 - `GET /replays/{battle_id}`
+- `GET /replays/{battle_id}/frames`
 - `GET /replays/{battle_id}?snapshot_frame=240`
 - `GET /maps`
 - `GET /maps/{map_name}/heightmap.bmp`
@@ -217,6 +218,7 @@ Map asset behavior:
 Replay lookup behavior:
 
 - `GET /replays/{battle_id}` returns the full replay record
+- `GET /replays/{battle_id}/frames` returns the ordered snapshot frame index for that replay
 - `GET /replays/{battle_id}?snapshot_frame=<frame>` returns the same replay envelope with `global_snapshots`, `allyteam_snapshots`, and `economy_snapshots` filtered to that exact frame
 - if the replay exists but no snapshot is present at that frame, the endpoint returns `404`
 - full replay reads reconstruct the replay from metadata plus per-frame rows
@@ -236,8 +238,23 @@ Behavior:
 
 - reads only the legacy top-level battle rows from `--src`
 - writes the new CBOR metadata/frame layout to `--dst` with `sled` compression enabled
-- rebuilds replay summaries in the destination DB
 - refuses to write into an existing destination path
+
+## Refresh New Databases
+
+If a new-format DB needs its metadata counters refreshed, run:
+
+```powershell
+cargo run --release --bin zkscraper -- refresh-db `
+  --db .\target\parsed-db
+```
+
+Behavior:
+
+- recomputes metadata counters from frame rows
+- rebuilds the replay-id index used for fast server startup
+- deletes the legacy `replay_summaries` tree if it exists
+- shows a progress bar while it runs
 
 ## Stored Replay Structure
 

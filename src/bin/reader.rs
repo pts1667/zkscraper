@@ -33,8 +33,9 @@ enum Command {
         lossy: bool,
     },
 
-    /// Build or refresh the lightweight summary index with a progress bar
-    BuildSummaryIndex,
+    /// Refresh replay metadata counters and delete any legacy summaries tree
+    #[command(name = "refresh-metadata")]
+    RefreshMetadata,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -61,10 +62,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 print_parsed_replay_summary(&parsed);
             }
         }
-        Command::BuildSummaryIndex => {
+        Command::RefreshMetadata => {
             let db = ReplayDb::open(args.db)?;
-            let generated = db.build_summary_index()?;
-            println!("generated_summaries: {generated}");
+            let refreshed = db.refresh_metadata()?;
+            println!("refreshed_metadata_rows: {refreshed}");
         }
     }
 

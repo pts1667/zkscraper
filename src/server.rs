@@ -73,6 +73,12 @@ pub struct HealthResponse {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct ReplayFramesResponse {
+    pub battle_id: u64,
+    pub frames: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct ApiErrorBody {
     pub error: String,
 }
@@ -124,6 +130,7 @@ impl IntoResponse for ApiError {
         healthz,
         list_replays,
         get_replay,
+        get_replay_frames,
         list_maps,
         get_map_heightmap,
         get_map_features
@@ -133,6 +140,7 @@ impl IntoResponse for ApiError {
         HealthResponse,
         ReplayListQuery,
         ReplayQuery,
+        ReplayFramesResponse,
         ReplayListResponse,
         ReplaySummary,
         MapListResponse,
@@ -180,6 +188,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/replays", get(list_replays))
         .route("/replays/{battle_id}", get(get_replay))
+        .route("/replays/{battle_id}/frames", get(get_replay_frames))
         .route("/maps", get(list_maps))
         .route("/maps/{map_name}/heightmap.bmp", get(get_map_heightmap))
         .route("/maps/{map_name}/features", get(get_map_features))
@@ -243,13 +252,13 @@ async fn list_replays(
 #[fastapi::path(
     get,
     path = "/replays/{battle_id}",
-    params(ReplayQuery),
     responses(
         (status = 200, description = "Full replay record", body = ParsedReplay),
         (status = 404, description = "Replay not found", body = ApiErrorBody),
         (status = 500, description = "Replay DB read failed", body = ApiErrorBody)
     ),
     params(
+        ReplayQuery,
         ("battle_id" = u64, Path, description = "Battle ID to fetch")
     )
 )]
@@ -273,6 +282,36 @@ async fn get_replay(
             "battle_id {battle_id} has no snapshot at frame {snapshot_frame}"
         ))),
         (None, None) => Err(ApiError::not_found(format!(
+            "battle_id {battle_id} not found"
+        ))),
+    }
+}
+
+#[fastapi::path(
+    get,
+    path = "/replays/{battle_id}/frames",
+    responses(
+        (status = 200, description = "Ordered snapshot frame index for the replay", body = ReplayFramesResponse),
+        (status = 404, description = "Replay not found", body = ApiErrorBody),
+        (status = 500, description = "Replay DB read failed", body = ApiErrorBody)
+    ),
+    params(
+        ("battle_id" = u64, Path, description = "Battle ID to fetch frame index for")
+    )
+)]
+async fn get_replay_frames(
+    State(state): State<AppState>,
+    Path(battle_id): Path<u64>,
+) -> Result<Json<ReplayFramesResponse>, ApiError> {
+    let db = state.db.clone();
+    let frames = tokio::task::spawn_blocking(move || db.get_replay_frames(battle_id))
+        .await
+        .map_err(|err| ApiError::internal(format!("replay frames task failed: {err}")))?
+        .map_err(|err| ApiError::internal(format!("failed to read replay frames {battle_id}: {err}")))?;
+
+    match frames {
+        Some(frames) => Ok(Json(ReplayFramesResponse { battle_id, frames })),
+        None => Err(ApiError::not_found(format!(
             "battle_id {battle_id} not found"
         ))),
     }
@@ -706,6 +745,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replay_frames_lookup_returns_frame_index(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let app = seeded_router(false)?;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/replays/2/frames")
+                    .body(Body::empty())?,
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await?;
+        let parsed: serde_json::Value = serde_json::from_slice(&body)?;
+        assert_eq!(parsed["battle_id"], 2);
+        assert_eq!(parsed["frames"], serde_json::json!([120, 240]));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn replay_lookup_can_filter_to_specific_snapshot_frame(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let app = seeded_router(false)?;
@@ -766,7 +825,18 @@ mod tests {
         assert!(paths.contains_key("/replays"));
         assert!(paths.contains_key("/maps"));
         assert!(paths.contains_key("/replays/{battle_id}"));
+        assert!(paths.contains_key("/replays/{battle_id}/frames"));
         assert!(paths.contains_key("/maps/{map_name}/features"));
+        let replay_get = parsed["paths"]["/replays/{battle_id}"]["get"]
+            .as_object()
+            .expect("replay get operation should be an object");
+        let parameters = replay_get["parameters"]
+            .as_array()
+            .expect("replay get operation should expose parameters");
+        assert!(parameters.iter().any(|param| param["name"] == "battle_id"));
+        assert!(parameters
+            .iter()
+            .any(|param| param["name"] == "snapshot_frame"));
         Ok(())
     }
 
