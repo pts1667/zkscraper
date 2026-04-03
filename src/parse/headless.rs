@@ -534,11 +534,10 @@ pub(super) fn activate_scraper_configs(
             } else if files_equal(&live_path, &backup_path)? {
                 fs::remove_file(&backup_path)?;
             } else {
-                return Err(format!(
-                    "refusing to overwrite existing backup file {}",
-                    backup_path.display()
-                )
-                .into());
+                // An interrupted prior run can leave the original config in .bak and a
+                // stale activated file at the live path. Keep the original backup and
+                // replace the live file with the current scraper variant.
+                fs::remove_file(&live_path)?;
             }
         }
         if live_path.exists() {
