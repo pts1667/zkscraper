@@ -512,41 +512,97 @@ pub fn migrate_replay_id_db(
 ) -> Result<(), ReplayDbError> {
     let src = src.as_ref();
     let dst = dst.as_ref();
-    if dst.exists() {
-        return Err(ReplayDbError::new(format!(
-            "destination DB path already exists: {}",
-            dst.display()
-        )));
-    }
     fs::create_dir_all(dst).map_err(|err| ReplayDbError::new(err.to_string()))?;
 
-    let src_db = ReplayDb::open(src)?;
-    let dst_db = ReplayDb::open(dst)?;
-    let replay_ids = src_db.replay_ids();
-    let pb = ProgressBar::new(replay_ids.len() as u64);
+    let src_db = open_compressed_db(src)?;
+    let src_replay_id_tree = src_db
+        .open_tree(REPLAY_ID_TREE)
+        .map_err(|err| ReplayDbError::new(err.to_string()))?;
+    let dst_db = open_compressed_db(dst)?;
+    let dst_replay_id_tree = dst_db
+        .open_tree(REPLAY_ID_TREE)
+        .map_err(|err| ReplayDbError::new(err.to_string()))?;
+
+    let total = src_replay_id_tree.len() as u64;
+    let pb = ProgressBar::new(total);
     pb.set_message("migrating replay-id DB");
     let mut migrated = 0usize;
+    let mut skipped = 0usize;
 
-    for replay_id in replay_ids {
-        let Some(mut replay) = src_db.get_replay(&replay_id)? else {
+    for entry in src_replay_id_tree.iter() {
+        let (key, _) = entry.map_err(|err| ReplayDbError::new(err.to_string()))?;
+        let replay_id = std::str::from_utf8(key.as_ref())
+            .map_err(|err| ReplayDbError::new(err.to_string()))?
+            .to_string();
+
+        if dst_replay_id_tree
+            .contains_key(key.as_ref())
+            .map_err(|err| ReplayDbError::new(err.to_string()))?
+        {
+            skipped += 1;
+            pb.inc(1);
             continue;
+        }
+
+        let Some(metadata_value) = src_db
+            .get(key.as_ref())
+            .map_err(|err| ReplayDbError::new(err.to_string()))?
+        else {
+            return Err(ReplayDbError::new(format!(
+                "replay_id {replay_id} is missing metadata row"
+            )));
         };
-        if replay.replay_id.is_empty() {
-            replay.replay_id = replay_id.clone();
+        let mut metadata: ReplayMetadataRecord = decode_cbor(metadata_value.as_ref())
+            .map_err(|err| ReplayDbError::new(err.to_string()))?;
+        if metadata.replay_id.is_empty() {
+            metadata.replay_id = replay_id.clone();
         }
-        if replay.battle_id.is_none() {
-            replay.battle_id = replay_id.parse::<u64>().ok();
+        if metadata.battle_id.is_none() {
+            metadata.battle_id = replay_id.parse::<u64>().ok();
         }
-        dst_db.put_replay(&replay)?;
+
+        let mut batch = sled::Batch::default();
+        batch.insert(
+            metadata_key(&replay_id).into_bytes(),
+            encode_cbor(&metadata).map_err(|err| ReplayDbError::new(err.to_string()))?,
+        );
+        for frame in &metadata.snapshot_frames {
+            let frame_key_value = frame_key(&replay_id, *frame);
+            let Some(frame_value) = src_db
+                .get(frame_key_value.as_bytes())
+                .map_err(|err| ReplayDbError::new(err.to_string()))?
+            else {
+                return Err(ReplayDbError::new(format!(
+                    "replay_id {replay_id} is missing frame row {frame}"
+                )));
+            };
+            batch.insert(frame_key_value.into_bytes(), frame_value);
+        }
+
+        dst_db
+            .apply_batch(batch)
+            .map_err(|err| ReplayDbError::new(err.to_string()))?;
+        dst_replay_id_tree
+            .insert(metadata_key(&replay_id).as_bytes(), &[] as &[u8])
+            .map_err(|err| ReplayDbError::new(err.to_string()))?;
         migrated += 1;
         pb.inc(1);
     }
 
-    if migrated == 0 {
+    dst_db
+        .flush()
+        .map_err(|err| ReplayDbError::new(err.to_string()))?;
+    dst_replay_id_tree
+        .flush()
+        .map_err(|err| ReplayDbError::new(err.to_string()))?;
+
+    if migrated == 0 && skipped == 0 {
         pb.finish_and_clear();
         return Err(ReplayDbError::new("source DB contained no replay rows"));
     }
-    pb.finish_with_message(format!("migrated {migrated} replay(s)"));
+    pb.finish_with_message(format!(
+        "migrated {migrated} replay(s), skipped {skipped} already present replay(s)"
+    ));
     Ok(())
 }
 
