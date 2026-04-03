@@ -525,11 +525,21 @@ pub(super) fn activate_scraper_configs(
         let live_path = config_dir.join(live_name);
         let backup_path = config_dir.join(format!("{live_name}.bak"));
         if backup_path.exists() {
-            return Err(format!(
-                "refusing to overwrite existing backup file {}",
-                backup_path.display()
-            )
-            .into());
+            if live_path.exists() && files_equal(&live_path, &scraper_path)? {
+                swapped.push(live_path);
+                continue;
+            }
+            if !live_path.exists() {
+                fs::rename(&backup_path, &live_path)?;
+            } else if files_equal(&live_path, &backup_path)? {
+                fs::remove_file(&backup_path)?;
+            } else {
+                return Err(format!(
+                    "refusing to overwrite existing backup file {}",
+                    backup_path.display()
+                )
+                .into());
+            }
         }
         if live_path.exists() {
             fs::rename(&live_path, &backup_path)?;
@@ -539,6 +549,10 @@ pub(super) fn activate_scraper_configs(
     }
 
     Ok(swapped)
+}
+
+fn files_equal(left: &Path, right: &Path) -> Result<bool, Box<dyn std::error::Error>> {
+    Ok(fs::read(left)? == fs::read(right)?)
 }
 
 fn ensure_default_scraper_configs(config_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
