@@ -24,9 +24,9 @@ enum Command {
 
     /// Show a compact summary for one replay
     Show {
-        /// Battle ID key
+        /// Replay ID key
         #[arg(long)]
-        battle_id: String,
+        replay_id: String,
 
         /// Read via the lossy JSON path that normalizes null float fields
         #[arg(long)]
@@ -43,22 +43,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match args.command {
         Command::List { max_count } => {
-            for battle_id in list_battle_ids(&args.db, max_count)? {
-                println!("{battle_id}");
+            for replay_id in list_replay_ids(&args.db, max_count)? {
+                println!("{replay_id}");
             }
         }
-        Command::Show { battle_id, lossy } => {
+        Command::Show { replay_id, lossy } => {
             let db = ReplayDb::open(args.db)?;
-            let battle_id_num = battle_id.parse::<u64>()?;
             if lossy {
                 let parsed = db
-                    .get_replay_value_lossy(battle_id_num)?
-                    .ok_or_else(|| format!("battle_id {} not found", battle_id))?;
+                    .get_replay_value_lossy(&replay_id)?
+                    .ok_or_else(|| format!("replay_id {} not found", replay_id))?;
                 print_replay_value_summary(&parsed);
             } else {
                 let parsed = db
-                    .get_replay(battle_id_num)?
-                    .ok_or_else(|| format!("battle_id {} not found", battle_id))?;
+                    .get_replay(&replay_id)?
+                    .ok_or_else(|| format!("replay_id {} not found", replay_id))?;
                 print_parsed_replay_summary(&parsed);
             }
         }
@@ -98,7 +97,8 @@ fn print_parsed_replay_summary(parsed: &zkscraper::parse::ParsedReplay) {
         .collect::<Vec<_>>()
         .join(", ");
 
-    println!("battle_id: {}", parsed.battle_id);
+    println!("replay_id: {}", parsed.replay_id);
+    println!("battle_id: {:?}", parsed.battle_id);
     println!("replay_filename: {}", parsed.replay_filename);
     println!("game_version: {}", parsed.game_version);
     println!("engine_version: {}", parsed.engine_version);
@@ -166,7 +166,8 @@ fn print_replay_value_summary(parsed: &serde_json::Value) {
         .collect::<Vec<_>>()
         .join(", ");
 
-    println!("battle_id: {}", summary.battle_id);
+    println!("replay_id: {}", summary.replay_id);
+    println!("battle_id: {:?}", summary.battle_id);
     println!(
         "replay_filename: {}",
         parsed["replay_filename"].as_str().unwrap_or_default()
@@ -215,14 +216,14 @@ fn print_replay_value_summary(parsed: &serde_json::Value) {
     println!("player_names: {}", player_names);
 }
 
-fn list_battle_ids(
+fn list_replay_ids(
     db_path: &PathBuf,
     max_count: Option<usize>,
-) -> Result<Vec<u64>, Box<dyn std::error::Error>> {
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let db = ReplayDb::open(db_path)?;
-    let mut battle_ids = db.battle_ids().to_vec();
+    let mut replay_ids = db.replay_ids();
     if let Some(max_count) = max_count {
-        battle_ids.truncate(max_count);
+        replay_ids.truncate(max_count);
     }
-    Ok(battle_ids)
+    Ok(replay_ids)
 }

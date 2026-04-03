@@ -26,7 +26,10 @@ impl std::error::Error for StorageError {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplayMetadataRecord {
-    pub battle_id: u64,
+    #[serde(default)]
+    pub replay_id: String,
+    #[serde(default)]
+    pub battle_id: Option<u64>,
     pub replay_filename: String,
     pub game_version: String,
     pub engine_version: String,
@@ -113,6 +116,7 @@ pub fn split_replay(replay: &ParsedReplay) -> (ReplayMetadataRecord, Vec<ReplayF
     let snapshot_frames = frame_map.keys().copied().collect::<Vec<_>>();
     (
         ReplayMetadataRecord {
+            replay_id: replay.replay_id.clone(),
             battle_id: replay.battle_id,
             replay_filename: replay.replay_filename.clone(),
             game_version: replay.game_version.clone(),
@@ -171,6 +175,14 @@ pub fn assemble_replay(
     }
 
     ParsedReplay {
+        replay_id: if metadata.replay_id.is_empty() {
+            metadata
+                .battle_id
+                .map(|battle_id| battle_id.to_string())
+                .unwrap_or_default()
+        } else {
+            metadata.replay_id
+        },
         battle_id: metadata.battle_id,
         replay_filename: metadata.replay_filename,
         game_version: metadata.game_version,

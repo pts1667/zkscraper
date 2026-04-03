@@ -85,7 +85,7 @@ pub async fn parse_replays_into_db(
                 return Err("parse interrupted by Ctrl+C".into());
             }
 
-            if db.contains_replay(entry.battle_id)? {
+            if db.contains_replay(&entry.replay_id)? {
                 pb.inc(1);
                 continue;
             }
@@ -93,11 +93,11 @@ pub async fn parse_replays_into_db(
             let replay_path = settings.sdfz_in.join(&entry.replay_filename);
             if !replay_path.is_file() {
                 eprintln!(
-                    "Parse failed for battle {}: replay file from manifest does not exist: {}",
-                    entry.battle_id,
+                    "Parse failed for replay {}: replay file from manifest does not exist: {}",
+                    entry.replay_id,
                     replay_path.display()
                 );
-                failures.push(format!("{} ({})", entry.battle_id, entry.replay_filename));
+                failures.push(format!("{} ({})", entry.replay_id, entry.replay_filename));
                 pb.inc(1);
                 continue;
             }
@@ -114,8 +114,8 @@ pub async fn parse_replays_into_db(
                 let script_metadata = parse_game_script(&dem_info.script)?;
                 let headless = resolve_engine_binary(&settings.zk_path, &dem_info.engine_version)?;
 
-                let replay_temp_dir = temp_root.join(entry.battle_id.to_string());
-                let capture_dir = zk_capture_root.join(entry.battle_id.to_string());
+                let replay_temp_dir = temp_root.join(&entry.replay_id);
+                let capture_dir = zk_capture_root.join(&entry.replay_id);
                 fs::create_dir_all(&capture_dir)?;
                 let config_path = replay_temp_dir.join("springsettings-headless.cfg");
 
@@ -128,12 +128,13 @@ pub async fn parse_replays_into_db(
                         &headless,
                         &settings.zk_path,
                         &replay_path,
-                        entry.battle_id,
+                        entry.headless_id,
                         interrupted.clone(),
                     )
                     .await?;
 
                 let parsed = ParsedReplay {
+                    replay_id: entry.replay_id.clone(),
                     battle_id: entry.battle_id,
                     replay_filename: entry.replay_filename.clone(),
                     game_version: entry.game_version.clone(),
@@ -159,10 +160,10 @@ pub async fn parse_replays_into_db(
 
             if let Err(err) = replay_outcome {
                 eprintln!(
-                    "Parse failed for battle {} ({}): {}",
-                    entry.battle_id, entry.replay_filename, err
+                    "Parse failed for replay {} ({}): {}",
+                    entry.replay_id, entry.replay_filename, err
                 );
-                failures.push(format!("{} ({})", entry.battle_id, entry.replay_filename));
+                failures.push(format!("{} ({})", entry.replay_id, entry.replay_filename));
             }
             pb.inc(1);
         }
@@ -206,7 +207,7 @@ pub async fn backfill_commands(
     let mut unit_name_cache: HashMap<String, HashMap<u32, String>> = HashMap::new();
 
     for entry in manifest {
-        let Some(mut parsed) = db.get_replay(entry.battle_id)? else {
+        let Some(mut parsed) = db.get_replay(&entry.replay_id)? else {
             pb.inc(1);
             continue;
         };
@@ -214,11 +215,11 @@ pub async fn backfill_commands(
         let replay_path = sdfz_in.join(&entry.replay_filename);
         if !replay_path.is_file() {
             eprintln!(
-                "Command backfill failed for battle {}: replay file from manifest does not exist: {}",
-                entry.battle_id,
+                "Command backfill failed for replay {}: replay file from manifest does not exist: {}",
+                entry.replay_id,
                 replay_path.display()
             );
-            failures.push(format!("{} ({})", entry.battle_id, entry.replay_filename));
+            failures.push(format!("{} ({})", entry.replay_id, entry.replay_filename));
             pb.inc(1);
             continue;
         }
@@ -238,10 +239,10 @@ pub async fn backfill_commands(
 
         if let Err(err) = backfill_result {
             eprintln!(
-                "Command backfill failed for battle {} ({}): {}",
-                entry.battle_id, entry.replay_filename, err
+                "Command backfill failed for replay {} ({}): {}",
+                entry.replay_id, entry.replay_filename, err
             );
-            failures.push(format!("{} ({})", entry.battle_id, entry.replay_filename));
+            failures.push(format!("{} ({})", entry.replay_id, entry.replay_filename));
         }
 
         pb.inc(1);
@@ -262,7 +263,7 @@ pub async fn backfill_commands(
 fn read_manifest(path: &Path) -> Result<Vec<ReplayManifestEntry>, Box<dyn std::error::Error>> {
     let mut reader = csv::Reader::from_path(path)?;
     let mut entries: Vec<ReplayManifestEntry> = reader.deserialize().collect::<Result<_, _>>()?;
-    entries.sort_by_key(|entry| entry.battle_id);
+    entries.sort_by(|left, right| left.replay_id.cmp(&right.replay_id));
     Ok(entries)
 }
 
@@ -275,7 +276,7 @@ fn sort_manifest_by_replay_size(
         let size = fs::metadata(&replay_path)
             .map(|metadata| metadata.len())
             .unwrap_or(u64::MAX);
-        (size, entry.battle_id)
+        (size, entry.replay_id.clone())
     });
     manifest
 }

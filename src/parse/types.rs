@@ -11,7 +11,9 @@ pub struct ParseReplaySettings {
 
 #[derive(Debug, Deserialize)]
 pub(super) struct ReplayManifestEntry {
-    pub battle_id: u64,
+    pub replay_id: String,
+    pub battle_id: Option<u64>,
+    pub headless_id: u64,
     pub replay_filename: String,
     pub game_version: String,
 }
@@ -40,7 +42,10 @@ pub(super) struct WidgetMeta {
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct ParsedReplay {
-    pub battle_id: u64,
+    #[serde(default)]
+    pub replay_id: String,
+    #[serde(default)]
+    pub battle_id: Option<u64>,
     pub replay_filename: String,
     pub game_version: String,
     pub engine_version: String,

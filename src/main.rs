@@ -148,6 +148,18 @@ enum Commands {
         #[arg(long)]
         db: PathBuf,
     },
+
+    /// Migrate a numeric battle-id keyed replay DB into the replay-id keyed layout
+    #[command(name = "migrate-replay-ids")]
+    MigrateReplayIds {
+        /// Source sled DB directory in the old battle-id keyed format
+        #[arg(long)]
+        src: PathBuf,
+
+        /// Destination sled DB directory to create in the replay-id keyed format
+        #[arg(long)]
+        dst: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -240,6 +252,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::RefreshDb { db: db_path } => {
             let db = db::ReplayDb::open(db_path)?;
             db.refresh_metadata().map(|_| ()).map_err(Into::into)
+        }
+        Commands::MigrateReplayIds { src, dst } => {
+            db::migrate_replay_id_db(src, dst).map_err(Into::into)
         }
     }
 }

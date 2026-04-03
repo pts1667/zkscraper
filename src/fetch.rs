@@ -24,6 +24,7 @@ const MANIFEST_FILENAME: &str = "replay_manifest.csv";
 
 #[derive(Clone)]
 struct ManifestEntry {
+    replay_id: String,
     battle_id: u64,
     replay_filename: String,
     game_version: String,
@@ -63,17 +64,41 @@ fn read_manifest(path: &Path) -> Result<BTreeMap<u64, ManifestEntry>, Box<dyn st
     let mut entries = BTreeMap::new();
     for record in reader.records() {
         let record = record?;
-        let Some(battle_id) = record.get(0) else {
-            continue;
+        let (replay_id, battle_id, replay_filename, game_version) = if record.len() >= 5 {
+            let Some(replay_id) = record.get(0) else {
+                continue;
+            };
+            let Some(battle_id) = record.get(1) else {
+                continue;
+            };
+            let Some(replay_filename) = record.get(3) else {
+                continue;
+            };
+            (
+                replay_id.to_string(),
+                battle_id,
+                replay_filename,
+                record.get(4).unwrap_or_default().to_string(),
+            )
+        } else {
+            let Some(battle_id) = record.get(0) else {
+                continue;
+            };
+            let Some(replay_filename) = record.get(1) else {
+                continue;
+            };
+            (
+                battle_id.to_string(),
+                battle_id,
+                replay_filename,
+                record.get(2).unwrap_or_default().to_string(),
+            )
         };
-        let Some(replay_filename) = record.get(1) else {
-            continue;
-        };
-        let game_version = record.get(2).unwrap_or_default().to_string();
 
         entries.insert(
             battle_id.parse()?,
             ManifestEntry {
+                replay_id,
                 battle_id: battle_id.parse()?,
                 replay_filename: replay_filename.to_string(),
                 game_version,
@@ -89,9 +114,17 @@ fn write_manifest(
     entries: impl IntoIterator<Item = ManifestEntry>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = csv::Writer::from_path(path)?;
-    writer.write_record(["battle_id", "replay_filename", "game_version"])?;
+    writer.write_record([
+        "replay_id",
+        "battle_id",
+        "headless_id",
+        "replay_filename",
+        "game_version",
+    ])?;
     for entry in entries {
         writer.write_record([
+            entry.replay_id,
+            entry.battle_id.to_string(),
             entry.battle_id.to_string(),
             entry.replay_filename,
             entry.game_version,
@@ -177,6 +210,7 @@ pub async fn fetch_replays(
         manifest_entries.insert(
             battle_id,
             ManifestEntry {
+                replay_id: battle_id.to_string(),
                 battle_id,
                 replay_filename,
                 game_version,

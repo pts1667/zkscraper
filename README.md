@@ -182,7 +182,7 @@ cargo run --release --bin reader -- --db .\target\parsed-db list
 Show a compact summary:
 
 ```powershell
-cargo run --release --bin reader -- --db .\target\parsed-db show --battle-id 2392822
+cargo run --release --bin reader -- --db .\target\parsed-db show --replay-id 2392822
 ```
 
 ## Serve Parsed Data Over HTTP
@@ -226,9 +226,10 @@ Available endpoints:
 - `GET /healthz`
 - `GET /replays?offset=0&limit=100`
 - `POST /replays/append`
-- `GET /replays/{battle_id}`
-- `GET /replays/{battle_id}/frames`
-- `GET /replays/{battle_id}?snapshot_frame=240`
+- `POST /replays/append-local`
+- `GET /replays/{replay_id}`
+- `GET /replays/{replay_id}/frames`
+- `GET /replays/{replay_id}?snapshot_frame=240`
 - `GET /maps`
 - `GET /maps/{map_name}/heightmap.bmp`
 - `GET /maps/{map_name}/features`
@@ -256,15 +257,23 @@ Replay lookup behavior:
 
 - `POST /replays/append` accepts JSON like `{ "battle_ids": [2392822, 2392823] }`
 - `POST /replays/append` processes the IDs synchronously and returns per-ID results in `application/cbor`
+- `POST /replays/append-local` accepts JSON like `{ "paths": ["C:\\replays\\local.sdfz"] }`
+- `POST /replays/append-local` assigns synthetic replay IDs like `local-1`, `local-2`, ...
 - `POST /replays/append` requires `--zk-path`; otherwise it returns `503`
 - only one `POST /replays/append` request runs at a time; concurrent append attempts return `409`
-- `GET /replays/{battle_id}` returns the full replay record
-- `GET /replays/{battle_id}/frames` returns the ordered snapshot frame index for that replay
-- `GET /replays/{battle_id}?snapshot_frame=<frame>` returns the same replay envelope with `global_snapshots`, `allyteam_snapshots`, and `economy_snapshots` filtered to that exact frame
+- `GET /replays/{replay_id}` returns the full replay record
+- `GET /replays/{replay_id}/frames` returns the ordered snapshot frame index for that replay
+- `GET /replays/{replay_id}?snapshot_frame=<frame>` returns the same replay envelope with `global_snapshots`, `allyteam_snapshots`, and `economy_snapshots` filtered to that exact frame
 - if the replay exists but no snapshot is present at that frame, the endpoint returns `404`
 - full replay reads reconstruct the replay from metadata plus per-frame rows
 - `snapshot_frame` lookups read the metadata row and one frame row directly
 - newly appended replays become visible to `GET /replays` immediately without restarting the server
+
+Replay IDs:
+
+- remote Zero-K replays use their numeric battle ID as the replay ID string, for example `2392822`
+- local imported replays use synthetic IDs such as `local-1`
+- replay records still keep `battle_id` metadata when available, but replay storage and HTTP lookup are keyed by `replay_id`
 
 ## Migrate Legacy Databases
 
@@ -298,15 +307,33 @@ Behavior:
 - deletes the legacy `replay_summaries` tree if it exists
 - shows a progress bar while it runs
 
+## Migrate Battle-ID Keyed Replay Databases
+
+If you have a replay DB created before replay IDs were introduced, migrate it once:
+
+```powershell
+cargo run --release --bin zkscraper -- migrate-replay-ids `
+  --src .\target\parsed-db-old `
+  --dst .\target\parsed-db
+```
+
+Behavior:
+
+- reads the old battle-ID keyed replay DB
+- writes a replay-ID keyed DB where remote replays get `replay_id == "<battle_id>"`
+- preserves `battle_id` metadata for existing remote replays
+- is required before using synthetic local replay IDs like `local-1`
+
 ## Stored Replay Structure
 
 Each replay is split across:
 
-- `<battle_id>` metadata row
-- zero or more `<battle_id>_frame_<frame>` snapshot rows
+- `<replay_id>` metadata row
+- zero or more `<replay_id>_frame_<frame>` snapshot rows
 
 The metadata row stores:
 
+- `replay_id`
 - `battle_id`
 - `replay_filename`
 - `game_version`

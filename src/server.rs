@@ -88,7 +88,7 @@ pub struct HealthResponse {
 
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct ReplayFramesResponse {
-    pub battle_id: u64,
+    pub replay_id: String,
     pub frames: Vec<u32>,
 }
 
@@ -98,8 +98,14 @@ pub struct AppendReplaysRequest {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct AppendLocalReplaysRequest {
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct AppendReplayResult {
-    pub battle_id: u64,
+    pub replay_id: String,
+    pub battle_id: Option<u64>,
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
@@ -191,6 +197,7 @@ where
         get_replay,
         get_replay_frames,
         append_replays,
+        append_local_replays,
         list_maps,
         get_map_heightmap,
         get_map_features
@@ -202,6 +209,7 @@ where
         ReplayQuery,
         ReplayFramesResponse,
         AppendReplaysRequest,
+        AppendLocalReplaysRequest,
         AppendReplayResult,
         AppendReplaysResponse,
         ReplayListResponse,
@@ -263,8 +271,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/replays", get(list_replays))
         .route("/replays/append", post(append_replays))
-        .route("/replays/{battle_id}", get(get_replay))
-        .route("/replays/{battle_id}/frames", get(get_replay_frames))
+        .route("/replays/append-local", post(append_local_replays))
+        .route("/replays/{replay_id}", get(get_replay))
+        .route("/replays/{replay_id}/frames", get(get_replay_frames))
         .route("/maps", get(list_maps))
         .route("/maps/{map_name}/heightmap.bmp", get(get_map_heightmap))
         .route("/maps/{map_name}/features", get(get_map_features))
@@ -334,7 +343,7 @@ async fn list_replays(
 
 #[fastapi::path(
     get,
-    path = "/replays/{battle_id}",
+    path = "/replays/{replay_id}",
     responses(
         (status = 200, description = "Full replay record", body = ParsedReplay),
         (status = 404, description = "Replay not found", body = ApiErrorBody),
@@ -342,62 +351,66 @@ async fn list_replays(
     ),
     params(
         ReplayQuery,
-        ("battle_id" = u64, Path, description = "Battle ID to fetch")
+        ("replay_id" = String, Path, description = "Replay ID to fetch")
     )
 )]
 async fn get_replay(
     State(state): State<AppState>,
-    Path(battle_id): Path<u64>,
+    Path(replay_id): Path<String>,
     Query(query): Query<ReplayQuery>,
 ) -> Result<Cbor<serde_json::Value>, ApiError> {
     let db = state.db.clone();
+    let replay_id_for_task = replay_id.clone();
     let replay = tokio::task::spawn_blocking(move || match query.snapshot_frame {
-        Some(snapshot_frame) => db.get_replay_frame_value_lossy(battle_id, snapshot_frame),
-        None => db.get_replay_value_lossy(battle_id),
+        Some(snapshot_frame) => {
+            db.get_replay_frame_value_lossy(&replay_id_for_task, snapshot_frame)
+        }
+        None => db.get_replay_value_lossy(&replay_id_for_task),
     })
     .await
     .map_err(|err| ApiError::internal(format!("replay read task failed: {err}")))?
-    .map_err(|err| ApiError::internal(format!("failed to read replay {battle_id}: {err}")))?;
+    .map_err(|err| ApiError::internal(format!("failed to read replay {replay_id}: {err}")))?;
 
     match (replay, query.snapshot_frame) {
         (Some(replay), _) => Ok(Cbor(replay)),
         (None, Some(snapshot_frame)) => Err(ApiError::not_found(format!(
-            "battle_id {battle_id} has no snapshot at frame {snapshot_frame}"
+            "replay_id {replay_id} has no snapshot at frame {snapshot_frame}"
         ))),
         (None, None) => Err(ApiError::not_found(format!(
-            "battle_id {battle_id} not found"
+            "replay_id {replay_id} not found"
         ))),
     }
 }
 
 #[fastapi::path(
     get,
-    path = "/replays/{battle_id}/frames",
+    path = "/replays/{replay_id}/frames",
     responses(
         (status = 200, description = "Ordered snapshot frame index for the replay", body = ReplayFramesResponse),
         (status = 404, description = "Replay not found", body = ApiErrorBody),
         (status = 500, description = "Replay DB read failed", body = ApiErrorBody)
     ),
     params(
-        ("battle_id" = u64, Path, description = "Battle ID to fetch frame index for")
+        ("replay_id" = String, Path, description = "Replay ID to fetch frame index for")
     )
 )]
 async fn get_replay_frames(
     State(state): State<AppState>,
-    Path(battle_id): Path<u64>,
+    Path(replay_id): Path<String>,
 ) -> Result<Cbor<ReplayFramesResponse>, ApiError> {
     let db = state.db.clone();
-    let frames = tokio::task::spawn_blocking(move || db.get_replay_frames(battle_id))
+    let replay_id_for_task = replay_id.clone();
+    let frames = tokio::task::spawn_blocking(move || db.get_replay_frames(&replay_id_for_task))
         .await
         .map_err(|err| ApiError::internal(format!("replay frames task failed: {err}")))?
         .map_err(|err| {
-            ApiError::internal(format!("failed to read replay frames {battle_id}: {err}"))
+            ApiError::internal(format!("failed to read replay frames {replay_id}: {err}"))
         })?;
 
     match frames {
-        Some(frames) => Ok(Cbor(ReplayFramesResponse { battle_id, frames })),
+        Some(frames) => Ok(Cbor(ReplayFramesResponse { replay_id, frames })),
         None => Err(ApiError::not_found(format!(
-            "battle_id {battle_id} not found"
+            "replay_id {replay_id} not found"
         ))),
     }
 }
@@ -446,6 +459,57 @@ async fn append_replays(
             .build()
             .map_err(|err| format!("failed to create append runtime: {err}"))?
             .block_on(append_replays_impl(&state, payload, zk_path))
+    })
+    .await
+    .map_err(|err| ApiError::internal(format!("append task failed: {err}")))?
+    .map(Cbor)
+    .map_err(ApiError::internal)
+}
+
+#[fastapi::path(
+    post,
+    path = "/replays/append-local",
+    responses(
+        (status = 200, description = "Local replay files processed and merged into the live DB", body = AppendReplaysResponse),
+        (status = 400, description = "Invalid append request", body = ApiErrorBody),
+        (status = 409, description = "Another append request is already in progress", body = ApiErrorBody),
+        (status = 503, description = "Append requires a configured Zero-K install", body = ApiErrorBody),
+        (status = 500, description = "Append processing failed", body = ApiErrorBody)
+    )
+)]
+async fn append_local_replays(
+    State(state): State<AppState>,
+    Json(payload): Json<AppendLocalReplaysRequest>,
+) -> Result<Cbor<AppendReplaysResponse>, ApiError> {
+    if payload.paths.is_empty() {
+        return Err(ApiError::bad_request(
+            "paths must contain at least one replay path",
+        ));
+    }
+
+    let Some(zk_path) = state.zk_path.clone() else {
+        return Err(ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: "live append is unavailable without --zk-path".to_string(),
+        });
+    };
+
+    let _guard = state
+        .append_guard
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError {
+            status: StatusCode::CONFLICT,
+            message: "another append request is already in progress".to_string(),
+        })?;
+
+    let state = state.clone();
+    tokio::task::spawn_blocking(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| format!("failed to create append runtime: {err}"))?
+            .block_on(append_local_replays_impl(&state, payload, zk_path))
     })
     .await
     .map_err(|err| ApiError::internal(format!("append task failed: {err}")))?
@@ -568,11 +632,12 @@ async fn append_replays_impl(
     for battle_id in requested.iter().copied() {
         if state
             .db
-            .contains_replay(battle_id)
+            .contains_replay(&battle_id.to_string())
             .map_err(|err| format!("failed to inspect existing replay {battle_id}: {err}"))?
         {
             items.push(AppendReplayResult {
-                battle_id,
+                replay_id: battle_id.to_string(),
+                battle_id: Some(battle_id),
                 status: "skipped_existing".to_string(),
                 message: None,
             });
@@ -614,7 +679,8 @@ async fn append_replays_impl(
 
         for battle_id in failed_ids_from_gather {
             items.push(AppendReplayResult {
-                battle_id,
+                replay_id: battle_id.to_string(),
+                battle_id: Some(battle_id),
                 status: "failed".to_string(),
                 message: Some(
                     failure_messages
@@ -663,17 +729,19 @@ async fn append_replays_impl(
         for battle_id in rows.iter().map(|row| row.battle_id) {
             if state
                 .db
-                .contains_replay(battle_id)
+                .contains_replay(&battle_id.to_string())
                 .map_err(|err| format!("failed to inspect replay {battle_id}: {err}"))?
             {
                 items.push(AppendReplayResult {
-                    battle_id,
+                    replay_id: battle_id.to_string(),
+                    battle_id: Some(battle_id),
                     status: "inserted".to_string(),
                     message: None,
                 });
             } else {
                 items.push(AppendReplayResult {
-                    battle_id,
+                    replay_id: battle_id.to_string(),
+                    battle_id: Some(battle_id),
                     status: "failed".to_string(),
                     message: Some(
                         parse_error
@@ -681,6 +749,125 @@ async fn append_replays_impl(
                             .unwrap_or_else(|| "replay was not inserted".to_string()),
                     ),
                 });
+            }
+        }
+
+        Ok(summarize_append_results(items))
+    }
+    .await;
+
+    if let Err(err) = std::fs::remove_dir_all(&temp_root) {
+        eprintln!(
+            "failed to clean up append temp directory '{}': {}",
+            temp_root.display(),
+            err
+        );
+    }
+
+    append_result
+}
+
+async fn append_local_replays_impl(
+    state: &AppState,
+    payload: AppendLocalReplaysRequest,
+    zk_path: PathBuf,
+) -> Result<AppendReplaysResponse, String> {
+    let temp_root = make_append_temp_root()?;
+    let append_result = async {
+        let replay_dir_path = temp_root.join("replays");
+        std::fs::create_dir_all(&replay_dir_path)
+            .map_err(|err| format!("failed to create replay staging dir: {err}"))?;
+
+        let base_local_index = state
+            .db
+            .next_local_replay_id()
+            .map_err(|err| format!("failed to allocate local replay id: {err}"))?;
+        let mut next_local_index = base_local_index
+            .strip_prefix("local-")
+            .and_then(|suffix| suffix.parse::<u64>().ok())
+            .ok_or_else(|| format!("invalid generated local replay id: {base_local_index}"))?;
+
+        let manifest_path = replay_dir_path.join("replay_manifest.csv");
+        let mut manifest = csv::Writer::from_path(&manifest_path)
+            .map_err(|err| format!("failed to create local replay manifest: {err}"))?;
+        manifest
+            .write_record([
+                "replay_id",
+                "battle_id",
+                "headless_id",
+                "replay_filename",
+                "game_version",
+            ])
+            .map_err(|err| format!("failed to write local replay manifest header: {err}"))?;
+
+        let mut items = Vec::new();
+        for raw_path in payload.paths {
+            let source_path = PathBuf::from(&raw_path);
+            if !source_path.is_file() {
+                items.push(AppendReplayResult {
+                    replay_id: String::new(),
+                    battle_id: None,
+                    status: "failed".to_string(),
+                    message: Some(format!("replay file not found: {raw_path}")),
+                });
+                continue;
+            }
+
+            let replay_id = format!("local-{next_local_index}");
+            next_local_index += 1;
+            let replay_filename = format!("{replay_id}.sdfz");
+            std::fs::copy(&source_path, replay_dir_path.join(&replay_filename))
+                .map_err(|err| format!("failed to stage local replay '{raw_path}': {err}"))?;
+            manifest
+                .write_record([
+                    replay_id.clone(),
+                    String::new(),
+                    next_local_index.to_string(),
+                    replay_filename,
+                    "local".to_string(),
+                ])
+                .map_err(|err| format!("failed to write local replay manifest row: {err}"))?;
+            items.push(AppendReplayResult {
+                replay_id,
+                battle_id: None,
+                status: "pending".to_string(),
+                message: None,
+            });
+        }
+        manifest
+            .flush()
+            .map_err(|err| format!("failed to flush local replay manifest: {err}"))?;
+
+        let snapshot_work_path = temp_root.join("snapshot-work");
+        let parse_error = parse::parse_replays_into_db(
+            parse::ParseReplaySettings {
+                sdfz_in: replay_dir_path,
+                zk_path,
+                snapshot_path: snapshot_work_path,
+            },
+            state.db.clone(),
+        )
+        .await
+        .err()
+        .map(|err| err.to_string());
+
+        for item in &mut items {
+            if item.status == "failed" {
+                continue;
+            }
+            if state
+                .db
+                .contains_replay(&item.replay_id)
+                .map_err(|err| format!("failed to inspect replay {}: {err}", item.replay_id))?
+            {
+                item.status = "inserted".to_string();
+            } else {
+                item.status = "failed".to_string();
+                item.message = Some(
+                    parse_error
+                        .clone()
+                        .unwrap_or_else(|| "replay was not inserted".to_string()),
+                );
             }
         }
 
@@ -718,7 +905,7 @@ fn gather_failure_ids(requested: &[u64], rows: &[GatheredBattleRow]) -> Vec<u64>
 }
 
 fn summarize_append_results(mut items: Vec<AppendReplayResult>) -> AppendReplaysResponse {
-    items.sort_by_key(|item| item.battle_id);
+    items.sort_by(|left, right| left.replay_id.cmp(&right.replay_id));
     let inserted = items
         .iter()
         .filter(|item| item.status == "inserted")
@@ -811,7 +998,8 @@ mod tests {
 
     fn sample_replay(battle_id: u64) -> ParsedReplay {
         ParsedReplay {
-            battle_id,
+            replay_id: battle_id.to_string(),
+            battle_id: Some(battle_id),
             replay_filename: format!("{battle_id}.sdfz"),
             game_version: "1.0".to_string(),
             engine_version: "105.1".to_string(),
@@ -1142,7 +1330,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await?;
         let parsed: serde_json::Value = decode_cbor_body(&body)?;
-        assert_eq!(parsed["battle_id"], 2);
+        assert_eq!(parsed["replay_id"], "2");
         assert_eq!(parsed["frames"], serde_json::json!([120, 240]));
         Ok(())
     }
@@ -1217,22 +1405,23 @@ mod tests {
             .expect("openapi document should have paths");
         assert!(paths.contains_key("/replays"));
         assert!(paths.contains_key("/replays/append"));
+        assert!(paths.contains_key("/replays/append-local"));
         assert!(paths.contains_key("/maps"));
-        assert!(paths.contains_key("/replays/{battle_id}"));
-        assert!(paths.contains_key("/replays/{battle_id}/frames"));
+        assert!(paths.contains_key("/replays/{replay_id}"));
+        assert!(paths.contains_key("/replays/{replay_id}/frames"));
         assert!(paths.contains_key("/maps/{map_name}/features"));
         assert!(
             parsed["paths"]["/replays/append"]["post"]["requestBody"]["required"]
                 .as_bool()
                 .unwrap_or(false)
         );
-        let replay_get = parsed["paths"]["/replays/{battle_id}"]["get"]
+        let replay_get = parsed["paths"]["/replays/{replay_id}"]["get"]
             .as_object()
             .expect("replay get operation should be an object");
         let parameters = replay_get["parameters"]
             .as_array()
             .expect("replay get operation should expose parameters");
-        assert!(parameters.iter().any(|param| param["name"] == "battle_id"));
+        assert!(parameters.iter().any(|param| param["name"] == "replay_id"));
         assert!(parameters
             .iter()
             .any(|param| param["name"] == "snapshot_frame"));
