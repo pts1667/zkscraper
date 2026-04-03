@@ -167,8 +167,14 @@ fn print_replay_value_summary(parsed: &serde_json::Value) {
         .join(", ");
 
     println!("battle_id: {}", summary.battle_id);
-    println!("replay_filename: {}", parsed["replay_filename"].as_str().unwrap_or_default());
-    println!("game_version: {}", parsed["game_version"].as_str().unwrap_or_default());
+    println!(
+        "replay_filename: {}",
+        parsed["replay_filename"].as_str().unwrap_or_default()
+    );
+    println!(
+        "game_version: {}",
+        parsed["game_version"].as_str().unwrap_or_default()
+    );
     println!(
         "engine_version: {}",
         parsed["engine_version"].as_str().unwrap_or_default()

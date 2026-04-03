@@ -50,6 +50,15 @@ cargo run --release --bin zkscraper -- pipeline `
   --out .\target\parsed-db
 ```
 
+For an explicit list of battles instead of page scraping:
+
+```powershell
+cargo run --release --bin zkscraper -- pipeline `
+  --battle-id 2392822,2392823,2392824 `
+  --zk-path <zero-k install> `
+  --out .\target\parsed-db
+```
+
 Supports `--temp <dir>` to stage intermediate files somewhere else.
 If `--out` already exists, seeds the working DB from it before parsing so the pipeline updates the existing DB rather than starting from scratch.
 If a stage fails, preserves the best available parsed DB state at `<out>_fail`.
@@ -74,9 +83,20 @@ cargo run --release --bin zkscraper -- gather-battle-ids `
   --out .\target\battles.csv
 ```
 
+Or build the same CSV from an explicit list of battle IDs:
+
+```powershell
+cargo run --release --bin zkscraper -- gather-battle-ids `
+  --battle-id 2392822,2392823,2392824 `
+  --zk-path <zero-k install> `
+  --out .\target\battles.csv
+```
+
 Notes:
 
 - `--zk-path` is optional but recommended.
+- `--battle-id` can be repeated, and each use accepts a comma-delimited list.
+- `--battle-id` is an alternative to `--initial-offset` and `--gather-num`.
 - when `--zk-path` is provided, gather first tries to match maps already installed in `<zk_path>\maps`
 - if that guess is not reliable, gather falls back to battle/map page resolution
 - the CSV stores the exact downloadable map archive stem and extension, not just the display map name
@@ -191,10 +211,21 @@ Optional map asset support from a local Zero-K install:
 cargo run --release --bin serve-db -- --db .\target\parsed-db --zk-path <zero-k install>
 ```
 
+Optional live-append scrape settings:
+
+```powershell
+cargo run --release --bin serve-db -- `
+  --db .\target\parsed-db `
+  --zk-path <zero-k install> `
+  --site-url https://zero-k.info `
+  --min-req-wait 1000
+```
+
 Available endpoints:
 
 - `GET /healthz`
 - `GET /replays?offset=0&limit=100`
+- `POST /replays/append`
 - `GET /replays/{battle_id}`
 - `GET /replays/{battle_id}/frames`
 - `GET /replays/{battle_id}?snapshot_frame=240`
@@ -223,12 +254,17 @@ Map asset behavior:
 
 Replay lookup behavior:
 
+- `POST /replays/append` accepts JSON like `{ "battle_ids": [2392822, 2392823] }`
+- `POST /replays/append` processes the IDs synchronously and returns per-ID results in `application/cbor`
+- `POST /replays/append` requires `--zk-path`; otherwise it returns `503`
+- only one `POST /replays/append` request runs at a time; concurrent append attempts return `409`
 - `GET /replays/{battle_id}` returns the full replay record
 - `GET /replays/{battle_id}/frames` returns the ordered snapshot frame index for that replay
 - `GET /replays/{battle_id}?snapshot_frame=<frame>` returns the same replay envelope with `global_snapshots`, `allyteam_snapshots`, and `economy_snapshots` filtered to that exact frame
 - if the replay exists but no snapshot is present at that frame, the endpoint returns `404`
 - full replay reads reconstruct the replay from metadata plus per-frame rows
 - `snapshot_frame` lookups read the metadata row and one frame row directly
+- newly appended replays become visible to `GET /replays` immediately without restarting the server
 
 ## Migrate Legacy Databases
 

@@ -1,10 +1,9 @@
 use std::{
     collections::{BTreeSet, HashMap},
-    fmt,
-    fs,
+    fmt, fs,
     num::NonZeroUsize,
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
 };
 
 use fastapi::ToSchema;
@@ -41,7 +40,7 @@ impl std::error::Error for ReplayDbError {}
 pub struct ReplayDb {
     db: sled::Db,
     replay_id_tree: sled::Tree,
-    battle_ids: Arc<Vec<u64>>,
+    battle_ids: Arc<RwLock<Vec<u64>>>,
     summaries: Arc<Mutex<HashMap<u64, ReplaySummary>>>,
     replay_json_cache: Option<Arc<Mutex<LruCache<u64, Arc<serde_json::Value>>>>>,
 }
@@ -106,18 +105,24 @@ impl ReplayDb {
         Ok(Self {
             db,
             replay_id_tree,
-            battle_ids: Arc::new(battle_ids),
+            battle_ids: Arc::new(RwLock::new(battle_ids)),
             summaries: Arc::new(Mutex::new(HashMap::new())),
             replay_json_cache: replay_json_cache(),
         })
     }
 
-    pub fn battle_ids(&self) -> &[u64] {
-        self.battle_ids.as_slice()
+    pub fn battle_ids(&self) -> Vec<u64> {
+        self.battle_ids
+            .read()
+            .map(|battle_ids| battle_ids.clone())
+            .unwrap_or_default()
     }
 
     pub fn total(&self) -> usize {
-        self.battle_ids.len()
+        self.battle_ids
+            .read()
+            .map(|battle_ids| battle_ids.len())
+            .unwrap_or(0)
     }
 
     pub fn contains_replay(&self, battle_id: u64) -> Result<bool, ReplayDbError> {
@@ -153,6 +158,7 @@ impl ReplayDb {
         self.replay_id_tree
             .flush()
             .map_err(|err| ReplayDbError::new(err.to_string()))?;
+        self.insert_battle_id(replay.battle_id)?;
 
         self.summaries
             .lock()
@@ -252,8 +258,8 @@ impl ReplayDb {
         offset: usize,
         limit: usize,
     ) -> Result<ReplayListResponse, ReplayDbError> {
-        let items = self
-            .battle_ids
+        let battle_ids = self.battle_ids_snapshot()?;
+        let items = battle_ids
             .iter()
             .skip(offset)
             .take(limit)
@@ -353,11 +359,12 @@ impl ReplayDb {
             .clear()
             .map_err(|err| ReplayDbError::new(err.to_string()))?;
 
-        let pb = ProgressBar::new(self.battle_ids.len() as u64);
+        let battle_ids = self.battle_ids_snapshot()?;
+        let pb = ProgressBar::new(battle_ids.len() as u64);
         pb.set_message("refreshing replay metadata");
         let mut refreshed = 0usize;
 
-        for battle_id in self.battle_ids.iter().copied() {
+        for battle_id in battle_ids {
             let Some(mut metadata) = self.get_metadata_record(battle_id)? else {
                 return Err(ReplayDbError::new(format!(
                     "battle_id {battle_id} disappeared from the replay DB"
@@ -383,8 +390,51 @@ impl ReplayDb {
         self.replay_id_tree
             .flush()
             .map_err(|err| ReplayDbError::new(err.to_string()))?;
+        self.replace_battle_ids(self.load_battle_ids_from_tree()?)?;
         pb.finish_with_message(format!("refreshed {refreshed} replay metadata row(s)"));
         Ok(refreshed)
+    }
+
+    fn battle_ids_snapshot(&self) -> Result<Vec<u64>, ReplayDbError> {
+        self.battle_ids
+            .read()
+            .map(|battle_ids| battle_ids.clone())
+            .map_err(|_| ReplayDbError::new("battle id cache rwlock poisoned"))
+    }
+
+    fn insert_battle_id(&self, battle_id: u64) -> Result<(), ReplayDbError> {
+        let mut battle_ids = self
+            .battle_ids
+            .write()
+            .map_err(|_| ReplayDbError::new("battle id cache rwlock poisoned"))?;
+        match battle_ids.binary_search(&battle_id) {
+            Ok(_) => {}
+            Err(index) => battle_ids.insert(index, battle_id),
+        }
+        Ok(())
+    }
+
+    fn replace_battle_ids(&self, battle_ids: Vec<u64>) -> Result<(), ReplayDbError> {
+        let mut cached = self
+            .battle_ids
+            .write()
+            .map_err(|_| ReplayDbError::new("battle id cache rwlock poisoned"))?;
+        *cached = battle_ids;
+        Ok(())
+    }
+
+    fn load_battle_ids_from_tree(&self) -> Result<Vec<u64>, ReplayDbError> {
+        let mut battle_ids = Vec::new();
+        for entry in self.replay_id_tree.iter() {
+            let (key, _) = entry.map_err(|err| ReplayDbError::new(err.to_string()))?;
+            let battle_id = std::str::from_utf8(key.as_ref())
+                .map_err(|err| ReplayDbError::new(err.to_string()))?
+                .parse::<u64>()
+                .map_err(|err| ReplayDbError::new(err.to_string()))?;
+            battle_ids.push(battle_id);
+        }
+        battle_ids.sort_unstable();
+        Ok(battle_ids)
     }
 }
 
@@ -435,7 +485,9 @@ pub fn migrate_legacy_db(
 
     if migrated == 0 {
         pb.finish_and_clear();
-        return Err(ReplayDbError::new("source DB contained no legacy replay rows"));
+        return Err(ReplayDbError::new(
+            "source DB contained no legacy replay rows",
+        ));
     }
     pb.finish_with_message(format!("migrated {migrated} replay(s)"));
     Ok(())
@@ -534,8 +586,14 @@ impl From<&ParsedReplay> for ReplaySummary {
                 .sum(),
             commands: replay.command_history.len(),
             events: replay.events.len(),
-            first_snapshot_frame: replay.global_snapshots.first().map(|snapshot| snapshot.frame),
-            last_snapshot_frame: replay.global_snapshots.last().map(|snapshot| snapshot.frame),
+            first_snapshot_frame: replay
+                .global_snapshots
+                .first()
+                .map(|snapshot| snapshot.frame),
+            last_snapshot_frame: replay
+                .global_snapshots
+                .last()
+                .map(|snapshot| snapshot.frame),
         }
     }
 }
@@ -827,9 +885,9 @@ fn sanitize_required_float(value: Option<&mut serde_json::Value>) {
 mod tests {
     use super::{migrate_legacy_db, ReplayDb};
     use crate::parse::{
-        AllyTeamSnapshotRecord, CommandOptionFlags, CommandRecord, DecodedCommand,
-        EconomySnapshot, EconomySnapshotRecord, EventRecord, MapSize, ParsedReplay,
-        PlayerMetadata, RadarContact, SnapshotRecord, TeamMetadata, UnitSnapshot,
+        AllyTeamSnapshotRecord, CommandOptionFlags, CommandRecord, DecodedCommand, EconomySnapshot,
+        EconomySnapshotRecord, EventRecord, MapSize, ParsedReplay, PlayerMetadata, RadarContact,
+        SnapshotRecord, TeamMetadata, UnitSnapshot,
     };
 
     fn sample_replay(battle_id: u64, first_frame: u32) -> ParsedReplay {
@@ -969,7 +1027,7 @@ mod tests {
         drop(replay_db);
 
         let replay_db = ReplayDb::open(temp_dir.path())?;
-        assert_eq!(replay_db.battle_ids(), &[2, 10]);
+        assert_eq!(replay_db.battle_ids(), vec![2, 10]);
 
         let page = replay_db.list_replay_summaries(0, 10)?;
         assert_eq!(page.items.len(), 2);
@@ -1000,7 +1058,23 @@ mod tests {
         drop(replay_db);
 
         let replay_db = ReplayDb::open(temp_dir.path())?;
-        assert_eq!(replay_db.battle_ids(), &[42]);
+        assert_eq!(replay_db.battle_ids(), vec![42]);
+        Ok(())
+    }
+
+    #[test]
+    fn put_replay_updates_live_battle_id_index() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let replay_db = ReplayDb::open(temp_dir.path())?;
+
+        replay_db.put_replay(&sample_replay(10, 120))?;
+        replay_db.put_replay(&sample_replay(2, 240))?;
+
+        assert_eq!(replay_db.battle_ids(), vec![2, 10]);
+        let page = replay_db.list_replay_summaries(0, 10)?;
+        assert_eq!(page.total, 2);
+        assert_eq!(page.items[0].battle_id, 2);
+        assert_eq!(page.items[1].battle_id, 10);
         Ok(())
     }
 
@@ -1034,7 +1108,9 @@ mod tests {
         let dst_path = dst_dir.path().join("migrated");
         migrate_legacy_db(src_dir.path(), &dst_path)?;
         let replay_db = ReplayDb::open(&dst_path)?;
-        let replay = replay_db.get_replay(88)?.expect("migrated replay should exist");
+        let replay = replay_db
+            .get_replay(88)?
+            .expect("migrated replay should exist");
         assert_eq!(replay.battle_id, 88);
         assert_eq!(replay.global_snapshots[0].frame, 240);
         Ok(())

@@ -1,18 +1,28 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    path::PathBuf,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use axum::{
     extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
-    routing::get,
-    Router,
+    routing::{get, post},
+    Json, Router,
 };
 use fastapi::{IntoParams, OpenApi, ToSchema};
 use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
+use url::Url;
 
 use crate::{
     db::{ReplayDb, ReplayListResponse, ReplaySummary},
+    gather::{self, GatheredBattleRow},
     map_assets::{MapFeature, MapFeaturesResponse, MapListResponse, MapService, MetalSpot},
+    maps, parse,
     parse::{
         AllyTeamSnapshotRecord, BuildCommand, CommandOptionFlags, CommandRecord, DecodedCommand,
         DecodedTarget, EventRecord, InsertedCommand, MapSize, ParsedReplay, PlayerMetadata,
@@ -50,6 +60,10 @@ pub const MAX_LIMIT: usize = 1000;
 pub struct AppState {
     pub db: ReplayDb,
     pub maps: Option<MapService>,
+    pub site_url: Url,
+    pub min_req_wait: u32,
+    pub zk_path: Option<PathBuf>,
+    pub append_guard: Arc<Semaphore>,
     pub openapi_json: Arc<String>,
 }
 
@@ -76,6 +90,28 @@ pub struct HealthResponse {
 pub struct ReplayFramesResponse {
     pub battle_id: u64,
     pub frames: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct AppendReplaysRequest {
+    pub battle_ids: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct AppendReplayResult {
+    pub battle_id: u64,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct AppendReplaysResponse {
+    pub requested: usize,
+    pub inserted: usize,
+    pub skipped_existing: usize,
+    pub failed: usize,
+    pub items: Vec<AppendReplayResult>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
@@ -154,6 +190,7 @@ where
         list_replays,
         get_replay,
         get_replay_frames,
+        append_replays,
         list_maps,
         get_map_heightmap,
         get_map_features
@@ -164,6 +201,9 @@ where
         ReplayListQuery,
         ReplayQuery,
         ReplayFramesResponse,
+        AppendReplaysRequest,
+        AppendReplayResult,
+        AppendReplaysResponse,
         ReplayListResponse,
         ReplaySummary,
         MapListResponse,
@@ -189,14 +229,20 @@ where
     )),
     info(
         title = "zkscraper Replay DB API",
-        description = "Read-only HTTP API for a parsed replay sled database"
+        description = "HTTP API for a parsed replay sled database, with optional live replay append support"
     )
 )]
 struct ApiDoc;
 
-pub fn app_state(db: ReplayDb, maps: Option<MapService>) -> AppState {
-    let mut openapi_value = serde_json::to_value(ApiDoc::openapi())
-        .expect("failed to serialize openapi document");
+pub fn app_state(
+    db: ReplayDb,
+    maps: Option<MapService>,
+    site_url: Url,
+    min_req_wait: u32,
+    zk_path: Option<PathBuf>,
+) -> AppState {
+    let mut openapi_value =
+        serde_json::to_value(ApiDoc::openapi()).expect("failed to serialize openapi document");
     rewrite_openapi_to_cbor(&mut openapi_value);
     let openapi_json =
         serde_json::to_string_pretty(&openapi_value).expect("failed to serialize openapi json");
@@ -204,6 +250,10 @@ pub fn app_state(db: ReplayDb, maps: Option<MapService>) -> AppState {
     AppState {
         db,
         maps,
+        site_url,
+        min_req_wait,
+        zk_path,
+        append_guard: Arc::new(Semaphore::new(1)),
         openapi_json: Arc::new(openapi_json),
     }
 }
@@ -212,6 +262,7 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/replays", get(list_replays))
+        .route("/replays/append", post(append_replays))
         .route("/replays/{battle_id}", get(get_replay))
         .route("/replays/{battle_id}/frames", get(get_replay_frames))
         .route("/maps", get(list_maps))
@@ -225,10 +276,17 @@ pub fn build_router(state: AppState) -> Router {
 pub async fn serve(
     db: ReplayDb,
     maps: Option<MapService>,
+    site_url: Url,
+    min_req_wait: u32,
+    zk_path: Option<PathBuf>,
     bind_addr: SocketAddr,
 ) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
-    axum::serve(listener, build_router(app_state(db, maps))).await?;
+    axum::serve(
+        listener,
+        build_router(app_state(db, maps, site_url, min_req_wait, zk_path)),
+    )
+    .await?;
     Ok(())
 }
 
@@ -332,7 +390,9 @@ async fn get_replay_frames(
     let frames = tokio::task::spawn_blocking(move || db.get_replay_frames(battle_id))
         .await
         .map_err(|err| ApiError::internal(format!("replay frames task failed: {err}")))?
-        .map_err(|err| ApiError::internal(format!("failed to read replay frames {battle_id}: {err}")))?;
+        .map_err(|err| {
+            ApiError::internal(format!("failed to read replay frames {battle_id}: {err}"))
+        })?;
 
     match frames {
         Some(frames) => Ok(Cbor(ReplayFramesResponse { battle_id, frames })),
@@ -340,6 +400,57 @@ async fn get_replay_frames(
             "battle_id {battle_id} not found"
         ))),
     }
+}
+
+#[fastapi::path(
+    post,
+    path = "/replays/append",
+    responses(
+        (status = 200, description = "Explicit battle IDs processed and merged into the live DB", body = AppendReplaysResponse),
+        (status = 400, description = "Invalid append request", body = ApiErrorBody),
+        (status = 409, description = "Another append request is already in progress", body = ApiErrorBody),
+        (status = 503, description = "Append requires a configured Zero-K install", body = ApiErrorBody),
+        (status = 500, description = "Append processing failed", body = ApiErrorBody)
+    )
+)]
+async fn append_replays(
+    State(state): State<AppState>,
+    Json(payload): Json<AppendReplaysRequest>,
+) -> Result<Cbor<AppendReplaysResponse>, ApiError> {
+    if payload.battle_ids.is_empty() {
+        return Err(ApiError::bad_request(
+            "battle_ids must contain at least one battle ID",
+        ));
+    }
+
+    let Some(zk_path) = state.zk_path.clone() else {
+        return Err(ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: "live append is unavailable without --zk-path".to_string(),
+        });
+    };
+
+    let _guard = state
+        .append_guard
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError {
+            status: StatusCode::CONFLICT,
+            message: "another append request is already in progress".to_string(),
+        })?;
+
+    let state = state.clone();
+    tokio::task::spawn_blocking(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| format!("failed to create append runtime: {err}"))?
+            .block_on(append_replays_impl(&state, payload, zk_path))
+    })
+    .await
+    .map_err(|err| ApiError::internal(format!("append task failed: {err}")))?
+    .map(Cbor)
+    .map_err(ApiError::internal)
 }
 
 #[fastapi::path(
@@ -445,8 +556,204 @@ fn map_asset_error(map_name: &str, err: impl std::fmt::Display) -> ApiError {
     }
 }
 
+async fn append_replays_impl(
+    state: &AppState,
+    payload: AppendReplaysRequest,
+    zk_path: PathBuf,
+) -> Result<AppendReplaysResponse, String> {
+    let requested = dedupe_battle_ids(&payload.battle_ids);
+    let mut items = Vec::with_capacity(requested.len());
+    let mut pending = Vec::new();
+
+    for battle_id in requested.iter().copied() {
+        if state
+            .db
+            .contains_replay(battle_id)
+            .map_err(|err| format!("failed to inspect existing replay {battle_id}: {err}"))?
+        {
+            items.push(AppendReplayResult {
+                battle_id,
+                status: "skipped_existing".to_string(),
+                message: None,
+            });
+        } else {
+            pending.push(battle_id);
+        }
+    }
+
+    if pending.is_empty() {
+        return Ok(summarize_append_results(items));
+    }
+
+    let temp_root = make_append_temp_root()?;
+    let append_result = async {
+        let battle_csv_path = temp_root.join("battles.csv");
+        let replay_dir_path = temp_root.join("replays");
+        let snapshot_work_path = temp_root.join("snapshot-work");
+
+        let (rows, failures) = gather::gather_battle_rows_for_ids(
+            state.site_url.clone(),
+            state.min_req_wait,
+            Some(zk_path.as_path()),
+            &pending,
+        )
+        .await
+        .map_err(|err| format!("failed to resolve battle metadata: {err}"))?;
+
+        let failed_ids_from_gather = gather_failure_ids(&pending, &rows);
+        let mut failure_messages = HashMap::new();
+        for failure in failures {
+            if let Some(battle_id) = failure
+                .split_whitespace()
+                .next()
+                .and_then(|raw| raw.parse::<u64>().ok())
+            {
+                failure_messages.insert(battle_id, failure);
+            }
+        }
+
+        for battle_id in failed_ids_from_gather {
+            items.push(AppendReplayResult {
+                battle_id,
+                status: "failed".to_string(),
+                message: Some(
+                    failure_messages
+                        .remove(&battle_id)
+                        .unwrap_or_else(|| "failed to resolve battle metadata".to_string()),
+                ),
+            });
+        }
+
+        if rows.is_empty() {
+            return Ok(summarize_append_results(items));
+        }
+
+        gather::write_gathered_battle_csv(&battle_csv_path, &rows)
+            .map_err(|err| format!("failed to write append battle CSV: {err}"))?;
+
+        maps::download_maps(maps::DownloadMapsSettings {
+            site_url: state.site_url.clone(),
+            csv_path: battle_csv_path.clone(),
+            min_req_wait: state.min_req_wait,
+            zk_path: zk_path.clone(),
+        })
+        .await
+        .map_err(|err| format!("failed to download required maps: {err}"))?;
+
+        crate::fetch::fetch_replays(crate::fetch::FetchReplaySettings {
+            site_url: state.site_url.clone(),
+            csv_path: battle_csv_path,
+            min_req_wait: state.min_req_wait,
+            out_path: replay_dir_path.clone(),
+        })
+        .await
+        .map_err(|err| format!("failed to download replays: {err}"))?;
+
+        let parse_result = parse::parse_replays_into_db(
+            parse::ParseReplaySettings {
+                sdfz_in: replay_dir_path,
+                zk_path,
+                snapshot_path: snapshot_work_path,
+            },
+            state.db.clone(),
+        )
+        .await;
+
+        let parse_error = parse_result.err().map(|err| err.to_string());
+        for battle_id in rows.iter().map(|row| row.battle_id) {
+            if state
+                .db
+                .contains_replay(battle_id)
+                .map_err(|err| format!("failed to inspect replay {battle_id}: {err}"))?
+            {
+                items.push(AppendReplayResult {
+                    battle_id,
+                    status: "inserted".to_string(),
+                    message: None,
+                });
+            } else {
+                items.push(AppendReplayResult {
+                    battle_id,
+                    status: "failed".to_string(),
+                    message: Some(
+                        parse_error
+                            .clone()
+                            .unwrap_or_else(|| "replay was not inserted".to_string()),
+                    ),
+                });
+            }
+        }
+
+        Ok(summarize_append_results(items))
+    }
+    .await;
+
+    if let Err(err) = std::fs::remove_dir_all(&temp_root) {
+        eprintln!(
+            "failed to clean up append temp directory '{}': {}",
+            temp_root.display(),
+            err
+        );
+    }
+
+    append_result
+}
+
+fn dedupe_battle_ids(battle_ids: &[u64]) -> Vec<u64> {
+    let mut seen = std::collections::HashSet::new();
+    battle_ids
+        .iter()
+        .copied()
+        .filter(|battle_id| seen.insert(*battle_id))
+        .collect()
+}
+
+fn gather_failure_ids(requested: &[u64], rows: &[GatheredBattleRow]) -> Vec<u64> {
+    let gathered: std::collections::HashSet<u64> = rows.iter().map(|row| row.battle_id).collect();
+    requested
+        .iter()
+        .copied()
+        .filter(|battle_id| !gathered.contains(battle_id))
+        .collect()
+}
+
+fn summarize_append_results(mut items: Vec<AppendReplayResult>) -> AppendReplaysResponse {
+    items.sort_by_key(|item| item.battle_id);
+    let inserted = items
+        .iter()
+        .filter(|item| item.status == "inserted")
+        .count();
+    let skipped_existing = items
+        .iter()
+        .filter(|item| item.status == "skipped_existing")
+        .count();
+    let failed = items.iter().filter(|item| item.status == "failed").count();
+    AppendReplaysResponse {
+        requested: items.len(),
+        inserted,
+        skipped_existing,
+        failed,
+        items,
+    }
+}
+
+fn make_append_temp_root() -> Result<PathBuf, String> {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| format!("system clock error: {err}"))?
+        .as_nanos();
+    let path =
+        std::env::temp_dir().join(format!("zkscraper-append-{}-{}", std::process::id(), stamp));
+    std::fs::create_dir_all(&path)
+        .map_err(|err| format!("failed to create append temp directory: {err}"))?;
+    Ok(path)
+}
+
 fn rewrite_openapi_to_cbor(value: &mut serde_json::Value) {
-    let Some(paths) = value.get_mut("paths").and_then(serde_json::Value::as_object_mut) else {
+    let Some(paths) = value
+        .get_mut("paths")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
         return;
     };
     for path_item in paths.values_mut() {
@@ -483,6 +790,7 @@ mod tests {
     };
     use std::io::Write;
     use tower::ServiceExt;
+    use url::Url;
 
     use super::{app_state, build_router};
     use crate::{
@@ -761,7 +1069,17 @@ mod tests {
         } else {
             None
         };
-        Ok(build_router(app_state(replay_db, maps)))
+        Ok(build_router(app_state(
+            replay_db,
+            maps,
+            Url::parse("https://zero-k.info")?,
+            1_000,
+            if with_maps {
+                Some(temp_path.clone())
+            } else {
+                None
+            },
+        )))
     }
 
     #[tokio::test]
@@ -850,9 +1168,15 @@ mod tests {
         let parsed: serde_json::Value = decode_cbor_body(&body)?;
         assert_eq!(parsed["global_snapshots"].as_array().unwrap().len(), 1);
         assert_eq!(parsed["global_snapshots"][0]["frame"], 240);
-        assert_eq!(parsed["allyteam_snapshots"]["0"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            parsed["allyteam_snapshots"]["0"].as_array().unwrap().len(),
+            1
+        );
         assert_eq!(parsed["allyteam_snapshots"]["0"][0]["frame"], 240);
-        assert_eq!(parsed["economy_snapshots"]["0"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            parsed["economy_snapshots"]["0"].as_array().unwrap().len(),
+            1
+        );
         assert_eq!(parsed["economy_snapshots"]["0"][0]["frame"], 240);
         Ok(())
     }
@@ -892,10 +1216,16 @@ mod tests {
             .as_object()
             .expect("openapi document should have paths");
         assert!(paths.contains_key("/replays"));
+        assert!(paths.contains_key("/replays/append"));
         assert!(paths.contains_key("/maps"));
         assert!(paths.contains_key("/replays/{battle_id}"));
         assert!(paths.contains_key("/replays/{battle_id}/frames"));
         assert!(paths.contains_key("/maps/{map_name}/features"));
+        assert!(
+            parsed["paths"]["/replays/append"]["post"]["requestBody"]["required"]
+                .as_bool()
+                .unwrap_or(false)
+        );
         let replay_get = parsed["paths"]["/replays/{battle_id}"]["get"]
             .as_object()
             .expect("replay get operation should be an object");
@@ -955,6 +1285,52 @@ mod tests {
             .as_array()
             .expect("items should be an array");
         assert!(items.iter().any(|item| item == "TestMap"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_route_returns_503_without_zk_path(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let app = seeded_router(false)?;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/replays/append")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"battle_ids":[123]}"#))?,
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_route_returns_409_when_append_is_in_progress(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let temp_dir = tempfile::tempdir()?;
+        let replay_db = ReplayDb::open(temp_dir.path())?;
+        let state = app_state(
+            replay_db,
+            None,
+            Url::parse("https://zero-k.info")?,
+            1_000,
+            Some(temp_dir.path().to_path_buf()),
+        );
+        let _guard = state.append_guard.clone().try_acquire_owned()?;
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/replays/append")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"battle_ids":[123]}"#))?,
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
         Ok(())
     }
 }

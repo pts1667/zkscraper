@@ -173,7 +173,8 @@ pub async fn resolve_map_archive_name_from_battle(
     client: &RateLimitedHttpClient,
     site_url: &Url,
 ) -> Result<Option<(String, String)>, Box<dyn std::error::Error>> {
-    let Some(download_url) = resolve_map_download_url_from_battle(battle_id, client, site_url).await?
+    let Some(download_url) =
+        resolve_map_download_url_from_battle(battle_id, client, site_url).await?
     else {
         return Ok(None);
     };

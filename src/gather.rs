@@ -54,6 +54,26 @@ pub struct GatherBIDSettings {
     pub out_path: PathBuf,
     pub zk_path: Option<PathBuf>,
     pub gather_filter: GatherFilterSettings,
+    pub explicit_battle_ids: Vec<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatheredBattleRow {
+    pub battle_id: u64,
+    pub version: String,
+    pub map_file: String,
+    pub map_extension: String,
+}
+
+impl GatheredBattleRow {
+    fn csv_record(&self) -> [String; 4] {
+        [
+            self.battle_id.to_string(),
+            self.version.clone(),
+            self.map_file.clone(),
+            self.map_extension.clone(),
+        ]
+    }
 }
 
 #[derive(Clone)]
@@ -143,12 +163,138 @@ fn guess_local_map_archive(
     None
 }
 
+pub fn write_gathered_battle_csv(
+    out_path: &Path,
+    rows: &[GatheredBattleRow],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut writer = csv::Writer::from_path(out_path)?;
+    writer.write_record(["Battle ID", "Version", "Map File", "Map Extension"])?;
+    for row in rows {
+        writer.write_record(row.csv_record())?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
 pub async fn gather_battle_ids(
     settings: GatherBIDSettings,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let req_url_end = "Battles";
-    let req_url = settings.site_url.join(req_url_end)?;
-    let g_filter = settings.gather_filter;
+    let (rows, failures) = if settings.explicit_battle_ids.is_empty() {
+        (
+            gather_battle_rows_from_listing(&settings).await?,
+            Vec::<String>::new(),
+        )
+    } else {
+        gather_battle_rows_for_ids(
+            settings.site_url.clone(),
+            settings.min_req_wait,
+            settings.zk_path.as_deref(),
+            &settings.explicit_battle_ids,
+        )
+        .await?
+    };
+
+    write_gathered_battle_csv(&settings.out_path, &rows)?;
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "failed to resolve {} explicit battle(s): {}",
+            failures.len(),
+            failures.join(", ")
+        )
+        .into())
+    }
+}
+
+pub async fn gather_battle_rows_for_ids(
+    site_url: Url,
+    min_req_wait: u32,
+    zk_path: Option<&Path>,
+    battle_ids: &[u64],
+) -> Result<(Vec<GatheredBattleRow>, Vec<String>), Box<dyn std::error::Error>> {
+    let client = RateLimitedHttpClient::new(Duration::from_millis(min_req_wait as u64));
+    let local_maps = load_local_map_archives(zk_path)?;
+    let version_re = Regex::new(r#"\(Zero-K v(?<version>[^\)]+)\)"#)?;
+    let map_thumbnail_re =
+        Regex::new(r#"<img src='/Resources/(?<map_file>[^/'"]+?)\.(?:thumbnail|minimap)\.jpg'"#)?;
+    let battle_url_base = site_url.join("Battles/Detail/")?;
+
+    let mut rows = Vec::new();
+    let mut failures = Vec::new();
+    let mut seen = HashSet::new();
+    let mut map_archives: HashMap<String, (String, String)> = HashMap::new();
+    let pb = ProgressBar::new(battle_ids.len() as u64);
+
+    for battle_id in battle_ids.iter().copied() {
+        if !seen.insert(battle_id) {
+            pb.inc(1);
+            continue;
+        }
+
+        let result: Result<GatheredBattleRow, Box<dyn std::error::Error>> = async {
+            let battle_html = client
+                .send(
+                    client
+                        .raw()
+                        .get(battle_url_base.join(&battle_id.to_string())?),
+                )
+                .await?
+                .text()
+                .await?;
+
+            let version = version_re
+                .captures(&battle_html)
+                .and_then(|cap| cap.name("version"))
+                .map(|matched| matched.as_str().trim().to_string())
+                .ok_or_else(|| format!("battle {battle_id} is missing a Zero-K version"))?;
+            let map_key = map_thumbnail_re
+                .captures(&battle_html)
+                .and_then(|cap| cap.name("map_file"))
+                .map(|matched| matched.as_str().trim().to_string())
+                .ok_or_else(|| format!("battle {battle_id} is missing a map thumbnail"))?;
+
+            let (map_file, map_extension) = if let Some(archive) = map_archives.get(&map_key) {
+                archive.clone()
+            } else if let Some(archive) = guess_local_map_archive(&local_maps, &map_key) {
+                map_archives.insert(map_key.clone(), archive.clone());
+                archive
+            } else {
+                let archive = resolve_map_archive_name_from_battle(battle_id, &client, &site_url)
+                    .await?
+                    .ok_or_else(|| {
+                        format!("could not resolve map archive while gathering battle {battle_id}")
+                    })?;
+                map_archives.insert(map_key.clone(), archive.clone());
+                archive
+            };
+
+            Ok(GatheredBattleRow {
+                battle_id,
+                version,
+                map_file,
+                map_extension,
+            })
+        }
+        .await;
+
+        match result {
+            Ok(row) => rows.push(row),
+            Err(err) => failures.push(format!("{battle_id} ({err})")),
+        }
+
+        pb.inc(1);
+    }
+
+    Ok((rows, failures))
+}
+
+async fn gather_battle_rows_from_listing(
+    settings: &GatherBIDSettings,
+) -> Result<Vec<GatheredBattleRow>, Box<dyn std::error::Error>> {
+    let req_url = settings.site_url.join("Battles")?;
+    let g_filter = &settings.gather_filter;
 
     let map_bool_opt = |opt, default: u32| match opt {
         None => default.to_string(),
@@ -157,8 +303,8 @@ pub async fn gather_battle_ids(
     };
 
     let mut req_form: HashMap<&'static str, String> = HashMap::new();
-    req_form.insert("Title", g_filter.title.unwrap_or("".to_string()));
-    req_form.insert("Map", g_filter.map.unwrap_or("".to_string()));
+    req_form.insert("Title", g_filter.title.clone().unwrap_or_default());
+    req_form.insert("Map", g_filter.map.clone().unwrap_or_default());
     req_form.insert(
         "PlayersFrom",
         g_filter.players_from.unwrap_or(1).to_string(),
@@ -184,10 +330,7 @@ pub async fn gather_battle_ids(
     let http_client =
         RateLimitedHttpClient::new(Duration::from_millis(settings.min_req_wait as u64));
     let local_maps = load_local_map_archives(settings.zk_path.as_deref())?;
-    let mut wtr = csv::Writer::from_path(settings.out_path)?;
-
-    wtr.write_record(["Battle ID", "Version", "Map File", "Map Extension"])?;
-
+    let mut rows = Vec::new();
     let mut battle_ids: HashSet<u64> = HashSet::new();
     let mut map_archives: HashMap<String, (String, String)> = HashMap::new();
     let mut offset = settings.initial_offset;
@@ -257,7 +400,12 @@ pub async fn gather_battle_ids(
                     archive
                 };
 
-                wtr.write_record(&[battle_id.to_string(), version, map_file, map_extension])?;
+                rows.push(GatheredBattleRow {
+                    battle_id: battle_id_p,
+                    version,
+                    map_file,
+                    map_extension,
+                });
                 battle_ids.insert(battle_id_p);
                 bar.inc(1);
             }
@@ -274,6 +422,5 @@ pub async fn gather_battle_ids(
         offset += 40;
     }
 
-    wtr.flush()?;
-    Ok(())
+    Ok(rows)
 }

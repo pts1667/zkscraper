@@ -13,6 +13,7 @@ pub struct PipelineSettings {
     pub min_req_wait: u32,
     pub initial_offset: u32,
     pub gather_num: u32,
+    pub explicit_battle_ids: Vec<u64>,
     pub zk_path: PathBuf,
     pub out_path: PathBuf,
     pub temp_root: Option<PathBuf>,
@@ -60,6 +61,7 @@ pub async fn run_pipeline(settings: PipelineSettings) -> Result<(), Box<dyn Erro
         out_path: paths.battle_csv_path.clone(),
         zk_path: Some(settings.zk_path.clone()),
         gather_filter: gather::GatherFilterSettings::default(),
+        explicit_battle_ids: settings.explicit_battle_ids.clone(),
     })
     .await
     {
@@ -291,9 +293,9 @@ fn build_resume_command(
     let base = "cargo run --release --bin zkscraper --";
     match failed_stage {
         PipelineStage::GatherBattleIds => format!(
-            "{base} gather-battle-ids --initial-offset {} --gather-num {} --zk-path {} --out {}",
-            settings.initial_offset,
-            quoted(&settings.gather_num.to_string()),
+            "{} gather-battle-ids {} --zk-path {} --out {}",
+            base,
+            gather_resume_args(settings),
             quoted_path(&settings.zk_path),
             quoted_path(&paths.battle_csv_path)
         ),
@@ -322,6 +324,27 @@ fn quoted_path(path: &Path) -> String {
 
 fn quoted(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\\\""))
+}
+
+fn gather_resume_args(settings: &PipelineSettings) -> String {
+    if settings.explicit_battle_ids.is_empty() {
+        format!(
+            "--initial-offset {} --gather-num {}",
+            settings.initial_offset, settings.gather_num
+        )
+    } else {
+        format!(
+            "--battle-id {}",
+            quoted(
+                &settings
+                    .explicit_battle_ids
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        )
+    }
 }
 
 fn rename_or_copy_dir(src: &Path, dst: &Path) -> Result<(), Box<dyn Error>> {
@@ -385,6 +408,7 @@ mod tests {
             min_req_wait: 1_000,
             initial_offset: 0,
             gather_num: 100,
+            explicit_battle_ids: Vec::new(),
             zk_path: PathBuf::from(r"C:\zk"),
             out_path: PathBuf::from(r".\target\parsed-db"),
             temp_root: None,
@@ -447,5 +471,20 @@ mod tests {
         );
         assert!(command.contains("parse-replays"));
         assert!(command.contains("--snapshot-path \".\\target\\parsed-db_fail\""));
+    }
+
+    #[test]
+    fn formats_explicit_battle_id_resume_command() {
+        let mut settings = sample_settings();
+        settings.explicit_battle_ids = vec![3, 2, 3, 10];
+        let paths = derive_pipeline_paths(&settings).unwrap();
+        let command = build_resume_command(
+            PipelineStage::GatherBattleIds,
+            &settings,
+            &paths,
+            &paths.battle_csv_path,
+        );
+        assert!(command.contains("gather-battle-ids"));
+        assert!(command.contains("--battle-id \"3,2,3,10\""));
     }
 }

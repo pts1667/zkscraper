@@ -25,12 +25,16 @@ enum Commands {
     #[command(name = "gather-battle-ids")]
     GatherBIDs {
         /// The initial offset to gather from
-        #[arg(long, default_value_t = 0)]
+        #[arg(long, default_value_t = 0, conflicts_with = "battle_id")]
         initial_offset: u32,
 
         /// Minimum number of battle IDs to gather
-        #[arg(long, default_value_t = 100)]
+        #[arg(long, default_value_t = 100, conflicts_with = "battle_id")]
         gather_num: u32,
+
+        /// Explicit battle IDs to gather, as a comma-delimited list. Can be repeated.
+        #[arg(long = "battle-id", value_delimiter = ',', num_args = 1.., conflicts_with_all = ["initial_offset", "gather_num"])]
+        battle_id: Vec<u64>,
 
         /// Optional path to Zero-K portable, used to guess existing map archives from maps/
         #[arg(long)]
@@ -69,12 +73,16 @@ enum Commands {
     #[command(name = "pipeline")]
     Pipeline {
         /// The initial offset to gather from
-        #[arg(long, default_value_t = 0)]
+        #[arg(long, default_value_t = 0, conflicts_with = "battle_id")]
         initial_offset: u32,
 
         /// Minimum number of battle IDs to gather
-        #[arg(long, default_value_t = 100)]
+        #[arg(long, default_value_t = 100, conflicts_with = "battle_id")]
         gather_num: u32,
+
+        /// Explicit battle IDs to process, as a comma-delimited list. Can be repeated.
+        #[arg(long = "battle-id", value_delimiter = ',', num_args = 1.., conflicts_with_all = ["initial_offset", "gather_num"])]
+        battle_id: Vec<u64>,
 
         /// Path to Zero-K portable
         #[arg(long)]
@@ -151,6 +159,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::GatherBIDs {
             initial_offset,
             gather_num,
+            battle_id,
             zk_path,
             out,
         } => {
@@ -162,6 +171,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 out_path: out,
                 zk_path,
                 gather_filter: gather::GatherFilterSettings::default(),
+                explicit_battle_ids: battle_id,
             })
             .await
         }
@@ -192,6 +202,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::Pipeline {
             initial_offset,
             gather_num,
+            battle_id,
             zk_path,
             out,
             temp,
@@ -201,6 +212,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 min_req_wait: args.min_req_wait,
                 initial_offset,
                 gather_num,
+                explicit_battle_ids: battle_id,
                 zk_path,
                 out_path: out,
                 temp_root: temp,

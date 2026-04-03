@@ -8,8 +8,8 @@ use std::{
     },
 };
 
-use indicatif::ProgressBar;
 use crate::db::ReplayDb;
+use indicatif::ProgressBar;
 
 mod demo;
 mod headless;
@@ -38,6 +38,14 @@ const WATCHDOG_EOF_GRACE_SECS: u64 = 15;
 pub async fn parse_replays(
     settings: ParseReplaySettings,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let db = ReplayDb::open(&settings.snapshot_path)?;
+    parse_replays_into_db(settings, db).await
+}
+
+pub async fn parse_replays_into_db(
+    settings: ParseReplaySettings,
+    db: ReplayDb,
+) -> Result<(), Box<dyn std::error::Error>> {
     let config_dir = settings.zk_path.join("LuaUI").join("Config");
     let swapped_configs = activate_scraper_configs(&config_dir)?;
     let interrupted = Arc::new(AtomicBool::new(false));
@@ -51,9 +59,10 @@ pub async fn parse_replays(
     let parse_future = async {
         validate_local_widgets_enabled(&settings.zk_path)?;
 
-        let manifest =
-            sort_manifest_by_replay_size(read_manifest(&settings.sdfz_in.join(MANIFEST_FILENAME))?, &settings.sdfz_in);
-        let db = ReplayDb::open(&settings.snapshot_path)?;
+        let manifest = sort_manifest_by_replay_size(
+            read_manifest(&settings.sdfz_in.join(MANIFEST_FILENAME))?,
+            &settings.sdfz_in,
+        );
         let temp_root = settings.snapshot_path.join("_tmp");
         let zk_capture_root = settings.zk_path.join(ZK_CAPTURE_ROOT);
         fs::create_dir_all(&temp_root)?;
@@ -263,7 +272,9 @@ fn sort_manifest_by_replay_size(
 ) -> Vec<ReplayManifestEntry> {
     manifest.sort_by_key(|entry| {
         let replay_path = sdfz_in.join(&entry.replay_filename);
-        let size = fs::metadata(&replay_path).map(|metadata| metadata.len()).unwrap_or(u64::MAX);
+        let size = fs::metadata(&replay_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(u64::MAX);
         (size, entry.battle_id)
     });
     manifest

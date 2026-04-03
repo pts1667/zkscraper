@@ -134,14 +134,23 @@ pub fn split_replay(replay: &ParsedReplay) -> (ReplayMetadataRecord, Vec<ReplayF
                 .values()
                 .map(|snapshots| snapshots.len())
                 .sum(),
-            first_snapshot_frame: replay.global_snapshots.first().map(|snapshot| snapshot.frame),
-            last_snapshot_frame: replay.global_snapshots.last().map(|snapshot| snapshot.frame),
+            first_snapshot_frame: replay
+                .global_snapshots
+                .first()
+                .map(|snapshot| snapshot.frame),
+            last_snapshot_frame: replay
+                .global_snapshots
+                .last()
+                .map(|snapshot| snapshot.frame),
         },
         frame_map.into_values().collect(),
     )
 }
 
-pub fn assemble_replay(metadata: ReplayMetadataRecord, frames: Vec<ReplayFrameRecord>) -> ParsedReplay {
+pub fn assemble_replay(
+    metadata: ReplayMetadataRecord,
+    frames: Vec<ReplayFrameRecord>,
+) -> ParsedReplay {
     let mut global_snapshots = Vec::new();
     let mut allyteam_snapshots: BTreeMap<u32, Vec<AllyTeamSnapshotRecord>> = BTreeMap::new();
     let mut economy_snapshots: BTreeMap<u32, Vec<EconomySnapshotRecord>> = BTreeMap::new();
@@ -181,6 +190,9 @@ pub fn assemble_replay(metadata: ReplayMetadataRecord, frames: Vec<ReplayFrameRe
     }
 }
 
-pub fn build_partial_replay(metadata: ReplayMetadataRecord, frame: ReplayFrameRecord) -> ParsedReplay {
+pub fn build_partial_replay(
+    metadata: ReplayMetadataRecord,
+    frame: ReplayFrameRecord,
+) -> ParsedReplay {
     assemble_replay(metadata, vec![frame])
 }
