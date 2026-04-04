@@ -447,6 +447,17 @@ function widget:Update()
 	disableReplayControls()
 end
 
+function widget:GamePaused(playerID, paused)
+	if not paused then
+		return
+	end
+
+	disableReplayControls()
+	spEcho("<ZKScraper> Pause detected; resuming replay.")
+	spSendCommands("pause 0")
+	forceReplaySpeed()
+end
+
 function widget:GameFrame(frame)
 	if frame % 300 == 0 then
 		forceReplaySpeed()
