@@ -47,7 +47,7 @@ pub async fn parse_replays_into_db(
     db: ReplayDb,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config_dir = settings.zk_path.join("LuaUI").join("Config");
-    let swapped_configs = activate_scraper_configs(&config_dir)?;
+    //let swapped_configs = activate_scraper_configs(&config_dir)?;
     let interrupted = Arc::new(AtomicBool::new(false));
     let interrupted_signal = interrupted.clone();
     let signal_task = tokio::spawn(async move {
@@ -183,7 +183,7 @@ pub async fn parse_replays_into_db(
     let parse_result: Result<(), Box<dyn std::error::Error>> = parse_future.await;
     signal_task.abort();
 
-    let restore_result = restore_scraper_configs(&swapped_configs);
+    //let restore_result = restore_scraper_configs(&swapped_configs);
     match (parse_result, restore_result) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(parse_err), Ok(())) => Err(parse_err),
