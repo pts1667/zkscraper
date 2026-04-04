@@ -2,11 +2,14 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
+    process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
 };
+
+use fs2::FileExt;
 
 use crate::db::ReplayDb;
 use indicatif::ProgressBar;
@@ -18,8 +21,7 @@ mod types;
 
 use demo::{enrich_command_history_with_unit_names, read_dem_info};
 use headless::{
-    activate_scraper_configs, resolve_engine_binary, restore_scraper_configs, run_single_replay,
-    validate_local_widgets_enabled,
+    resolve_engine_binary, run_single_replay, validate_local_widgets_enabled,
 };
 use script::parse_game_script;
 use types::ReplayManifestEntry;
@@ -34,6 +36,18 @@ const WATCHDOG_POLL_MS: u64 = 250;
 const WATCHDOG_TOTAL_TIMEOUT_SECS: u64 = 300;
 const WATCHDOG_IDLE_TIMEOUT_SECS: u64 = 20;
 const WATCHDOG_EOF_GRACE_SECS: u64 = 15;
+const HEADLESS_PARSE_LOCK_NAME: &str = ".zkscraper-headless.lock";
+
+#[derive(Debug)]
+struct HeadlessParseLock {
+    file: fs::File,
+}
+
+impl Drop for HeadlessParseLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
 
 pub async fn parse_replays(
     settings: ParseReplaySettings,
@@ -46,8 +60,7 @@ pub async fn parse_replays_into_db(
     settings: ParseReplaySettings,
     db: ReplayDb,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config_dir = settings.zk_path.join("LuaUI").join("Config");
-    //let swapped_configs = activate_scraper_configs(&config_dir)?;
+    let _headless_lock = acquire_headless_parse_lock(&settings.zk_path)?;
     let interrupted = Arc::new(AtomicBool::new(false));
     let interrupted_signal = interrupted.clone();
     let signal_task = tokio::spawn(async move {
@@ -58,6 +71,7 @@ pub async fn parse_replays_into_db(
 
     let parse_future = async {
         validate_local_widgets_enabled(&settings.zk_path)?;
+        ensure_no_running_headless_process()?;
 
         let manifest = sort_manifest_by_replay_size(
             read_manifest(&settings.sdfz_in.join(MANIFEST_FILENAME))?,
@@ -282,11 +296,80 @@ fn sort_manifest_by_replay_size(
     manifest
 }
 
+fn acquire_headless_parse_lock(
+    zk_path: &Path,
+) -> Result<HeadlessParseLock, Box<dyn std::error::Error>> {
+    let lock_path = zk_path.join(HEADLESS_PARSE_LOCK_NAME);
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
+    file.try_lock_exclusive().map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            format!(
+                "another replay parse is already in progress for {}",
+                zk_path.display()
+            ),
+        )
+    })?;
+
+    Ok(HeadlessParseLock { file })
+}
+
+pub(super) fn ensure_no_running_headless_process() -> Result<(), Box<dyn std::error::Error>> {
+    if headless_process_is_running()? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "spring-headless.exe is already running; only one replay parse may run at a time",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn headless_process_is_running() -> Result<bool, Box<dyn std::error::Error>> {
+    let output = if cfg!(target_os = "windows") {
+        Command::new("tasklist")
+            .args(["/FO", "CSV", "/NH"])
+            .output()?
+    } else {
+        Command::new("ps")
+            .args(["-A", "-o", "comm="])
+            .output()?
+    };
+
+    if !output.status.success() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!(
+                "failed to inspect running processes: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        )
+        .into());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if cfg!(target_os = "windows") {
+        Ok(stdout.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("\"spring-headless.exe\"") || line.starts_with("\"spring-headless\"")
+        }))
+    } else {
+        Ok(stdout.lines().any(|line| {
+            let name = line.trim();
+            name == "spring-headless" || name == "spring-headless.exe"
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
-    use super::{headless::engine_binary_candidates, ParsedReplay};
+    use super::{acquire_headless_parse_lock, headless::engine_binary_candidates, ParsedReplay};
 
     #[test]
     fn engine_candidates_include_cross_platform_locations() {
@@ -357,5 +440,17 @@ mod tests {
         .unwrap();
 
         assert!(replay.economy_snapshots.is_empty());
+    }
+
+    #[test]
+    fn headless_parse_lock_is_single_instance() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let _lock = acquire_headless_parse_lock(temp_dir.path())?;
+
+        let err = acquire_headless_parse_lock(temp_dir.path()).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("another replay parse is already in progress"));
+        Ok(())
     }
 }

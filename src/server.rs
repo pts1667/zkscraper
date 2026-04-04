@@ -154,6 +154,21 @@ impl ApiError {
     }
 }
 
+fn append_busy_error(message: &str) -> bool {
+    message.contains("another replay parse is already in progress")
+        || message.contains("spring-headless.exe is already running")
+        || message.contains("only one replay parse may run at a time")
+}
+
+fn append_api_error(message: String) -> ApiError {
+    let status = if append_busy_error(&message) {
+        StatusCode::CONFLICT
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    ApiError { status, message }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (
@@ -463,7 +478,7 @@ async fn append_replays(
     .await
     .map_err(|err| ApiError::internal(format!("append task failed: {err}")))?
     .map(Cbor)
-    .map_err(ApiError::internal)
+    .map_err(append_api_error)
 }
 
 #[fastapi::path(
@@ -514,7 +529,7 @@ async fn append_local_replays(
     .await
     .map_err(|err| ApiError::internal(format!("append task failed: {err}")))?
     .map(Cbor)
-    .map_err(ApiError::internal)
+    .map_err(append_api_error)
 }
 
 #[fastapi::path(

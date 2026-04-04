@@ -45,6 +45,7 @@ pub(super) async fn run_single_replay(
         return Err("parse interrupted by Ctrl+C".into());
     }
 
+    super::ensure_no_running_headless_process()?;
     install_widget(widget_source, widget_target)?;
     let absolute_zk_path = absolute_path(zk_path)?;
     let absolute_config_path = absolute_path(config_path)?;

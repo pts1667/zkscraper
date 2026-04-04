@@ -2575,6 +2575,7 @@ dependencies = [
  "csv",
  "fastapi",
  "flate2",
+ "fs2",
  "image",
  "indicatif",
  "lru",
