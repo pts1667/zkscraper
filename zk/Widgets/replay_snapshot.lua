@@ -43,6 +43,7 @@ local snapshotFrames = 120
 local replaySpeed = 1000
 local didQuit = false
 local replayStarted = false
+local replayControlsDisabled = false
 local allyTeamIDs = {}
 
 local function jsonEscape(str)
@@ -327,6 +328,25 @@ local function quitReplay()
 	spSendCommands("quitforce")
 end
 
+local function disableReplayControls()
+	if replayControlsDisabled then
+		return
+	end
+	if not widgetHandler or not widgetHandler.knownWidgets then
+		return
+	end
+	if not widgetHandler.knownWidgets["Replay control buttons"] then
+		return
+	end
+
+	widgetHandler:DisableWidget("Replay control buttons")
+	replayControlsDisabled = true
+	spEcho("<ZKScraper> Disabled Replay control buttons.")
+	spSendCommands("pause 0")
+	spSendCommands("setminspeed " .. replaySpeed)
+	spSendCommands("setmaxspeed " .. replaySpeed)
+end
+
 local function unpauseReplay()
 	spSendCommands("pause 0")
 end
@@ -355,9 +375,6 @@ function widget:Initialize()
 		spEcho("<ZKScraper> No configured output directory. Widget removed.")
 		widgetHandler:RemoveWidget()
 		return
-	end
-	if widgetHandler and widgetHandler.knownWidgets and widgetHandler.knownWidgets["Replay control buttons"] then
-		widgetHandler:DisableWidget("Replay control buttons")
 	end
 	Spring.CreateDir(captureDir)
 	local gaiaAllyTeamID = select(6, spGetTeamInfo(spGetGaiaTeamID(), false))
@@ -417,12 +434,17 @@ function widget:Initialize()
 
 	spSendCommands("forcestart")
 	spSendCommands("skip 0")
+	disableReplayControls()
 	unpauseReplay()
 	forceReplaySpeed()
 end
 
 function widget:Shutdown()
 	closeFiles()
+end
+
+function widget:Update()
+	disableReplayControls()
 end
 
 function widget:GameFrame(frame)
