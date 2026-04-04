@@ -167,6 +167,7 @@ async fn wait_for_headless(
     let mut last_progress = Instant::now();
     let mut replay_started = false;
     let mut widget_loaded = false;
+    let mut widget_load_race_reported = false;
     let mut eof_seen_at: Option<Instant> = None;
     let mut log_offset = log_offset;
     let mut log_fragment = String::new();
@@ -189,12 +190,20 @@ async fn wait_for_headless(
                 || line.contains(&format!("<{}>", WIDGET_LINK_NAME))
             {
                 widget_loaded = true;
+                eprintln!(
+                    "headless watcher: capture widget loaded for replay {}: {}",
+                    battle_id, line
+                );
             }
             if line.contains("Beginning demo playback")
                 || line.starts_with("[t=") && line.contains("[f=0000000]")
                 || line.contains("Playback continued")
             {
                 replay_started = true;
+                eprintln!(
+                    "headless watcher: replay start seen for replay {}: {}",
+                    battle_id, line
+                );
             }
             if line.contains("End of demo reached") {
                 eof_seen_at = Some(Instant::now());
@@ -218,13 +227,12 @@ async fn wait_for_headless(
             last_progress = Instant::now();
         }
 
-        if replay_started && !widget_loaded {
-            kill_child(child).await?;
-            return Err(format!(
-                "replay {} started simulating before the capture widget loaded",
+        if replay_started && !widget_loaded && !widget_load_race_reported {
+            widget_load_race_reported = true;
+            eprintln!(
+                "headless watcher: replay {} started before the capture widget loaded; continuing to wait",
                 battle_id
-            )
-            .into());
+            );
         }
 
         if started_at.elapsed() > Duration::from_secs(WATCHDOG_TOTAL_TIMEOUT_SECS) {

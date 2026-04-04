@@ -42,8 +42,8 @@ local captureDir
 local snapshotFrames = 120
 local replaySpeed = 1000
 local didQuit = false
-local replayStarted = false
 local replayControlsDisabled = false
+local inConsoleMsgHook = false
 local allyTeamIDs = {}
 
 local function jsonEscape(str)
@@ -470,14 +470,13 @@ function widget:GameFrame(frame)
 end
 
 function widget:AddConsoleMessage(msg)
-	if replayStarted then
+	if inConsoleMsgHook then
 		return
 	end
-	if msg and msg.text == "Beginning demo playback" then
-		replayStarted = true
-		unpauseReplay()
-		forceReplaySpeed()
-	end
+	inConsoleMsgHook = true
+	unpauseReplay()
+	forceReplaySpeed()
+	inConsoleMsgHook = false
 end
 
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
