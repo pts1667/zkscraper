@@ -184,6 +184,7 @@ pub async fn parse_replays_into_db(
     signal_task.abort();
 
     //let restore_result = restore_scraper_configs(&swapped_configs);
+    let restore_result = Ok(());
     match (parse_result, restore_result) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(parse_err), Ok(())) => Err(parse_err),
