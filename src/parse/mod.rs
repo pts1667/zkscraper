@@ -21,8 +21,7 @@ mod types;
 
 use demo::{enrich_command_history_with_unit_names, read_dem_info};
 use headless::{
-    activate_scraper_configs, resolve_engine_binary, restore_scraper_configs, run_single_replay,
-    validate_local_widgets_enabled,
+    resolve_engine_binary, run_single_replay, validate_local_widgets_enabled,
 };
 use script::parse_game_script;
 use types::ReplayManifestEntry;
@@ -62,8 +61,6 @@ pub async fn parse_replays_into_db(
     db: ReplayDb,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _headless_lock = acquire_headless_parse_lock(&settings.zk_path)?;
-    let config_dir = settings.zk_path.join("LuaUI").join("Config");
-    //let swapped_configs = activate_scraper_configs(&config_dir)?;
     let interrupted = Arc::new(AtomicBool::new(false));
     let interrupted_signal = interrupted.clone();
     let signal_task = tokio::spawn(async move {
@@ -200,17 +197,7 @@ pub async fn parse_replays_into_db(
     let parse_result: Result<(), Box<dyn std::error::Error>> = parse_future.await;
     signal_task.abort();
 
-    //let restore_result = restore_scraper_configs(&swapped_configs);
-    let restore_result = Ok(());
-    match (parse_result, restore_result) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(parse_err), Ok(())) => Err(parse_err),
-        (Ok(()), Err(restore_err)) => Err(restore_err),
-        (Err(parse_err), Err(restore_err)) => Err(format!(
-            "parse failed: {parse_err}; also failed to restore scraper configs: {restore_err}"
-        )
-        .into()),
-    }
+    parse_result
 }
 
 pub async fn backfill_commands(

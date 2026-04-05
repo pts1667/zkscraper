@@ -16,6 +16,7 @@ local spGetAllyTeamList = Spring.GetAllyTeamList
 local spGetConfigInt = Spring.GetConfigInt
 local spGetConfigString = Spring.GetConfigString
 local spGetGameFrame = Spring.GetGameFrame
+local spGetGameSpeed = Spring.GetGameSpeed
 local spGetGaiaTeamID = Spring.GetGaiaTeamID
 local spGetMyPlayerID = Spring.GetMyPlayerID
 local spGetPlayerInfo = Spring.GetPlayerInfo
@@ -328,6 +329,17 @@ local function quitReplay()
 	spSendCommands("quitforce")
 end
 
+local function isGamePaused()
+	return select(3, spGetGameSpeed())
+end
+
+local function unpauseReplay()
+	if not isGamePaused() then
+		return
+	end
+	spSendCommands("pause 0")
+end
+
 local function disableReplayControls()
 	if replayControlsDisabled then
 		return
@@ -342,13 +354,9 @@ local function disableReplayControls()
 	widgetHandler:DisableWidget("Replay control buttons")
 	replayControlsDisabled = true
 	spEcho("<ZKScraper> Disabled Replay control buttons.")
-	spSendCommands("pause 0")
+	unpauseReplay()
 	spSendCommands("setminspeed " .. replaySpeed)
 	spSendCommands("setmaxspeed " .. replaySpeed)
-end
-
-local function unpauseReplay()
-	spSendCommands("pause 0")
 end
 
 local function forceReplaySpeed()
@@ -454,7 +462,7 @@ function widget:GamePaused(playerID, paused)
 
 	disableReplayControls()
 	spEcho("<ZKScraper> Pause detected; resuming replay.")
-	spSendCommands("pause 0")
+	unpauseReplay()
 	forceReplaySpeed()
 end
 
@@ -471,6 +479,9 @@ end
 
 function widget:AddConsoleMessage(msg)
 	if inConsoleMsgHook then
+		return
+	end
+	if msg.text ~= "Beginning demo playback" then
 		return
 	end
 	inConsoleMsgHook = true
