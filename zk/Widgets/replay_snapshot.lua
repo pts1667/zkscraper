@@ -17,6 +17,8 @@ local spGetConfigInt = Spring.GetConfigInt
 local spGetConfigString = Spring.GetConfigString
 local spGetGameFrame = Spring.GetGameFrame
 local spGetGameSpeed = Spring.GetGameSpeed
+local spGetTimer = Spring.GetTimer
+local spDiffTimers = Spring.DiffTimers
 local spGetGaiaTeamID = Spring.GetGaiaTeamID
 local spGetMyPlayerID = Spring.GetMyPlayerID
 local spGetPlayerInfo = Spring.GetPlayerInfo
@@ -45,7 +47,11 @@ local replaySpeed = 1000
 local didQuit = false
 local replayControlsDisabled = false
 local inConsoleMsgHook = false
+local pauseRecoveryPending = false
+local pauseRecoveryStartedAt = nil
 local allyTeamIDs = {}
+local pauseRecoveryDelay = 0.1
+local forceReplaySpeed
 
 local function jsonEscape(str)
 	str = tostring(str or "")
@@ -340,6 +346,38 @@ local function unpauseReplay()
 	spSendCommands("pause 0")
 end
 
+local function requestPauseRecovery()
+	pauseRecoveryPending = true
+	pauseRecoveryStartedAt = spGetTimer()
+end
+
+local function clearPauseRecovery()
+	pauseRecoveryPending = false
+	pauseRecoveryStartedAt = nil
+end
+
+local function updatePauseRecovery()
+	if not pauseRecoveryPending then
+		return
+	end
+	if not isGamePaused() then
+		clearPauseRecovery()
+		return
+	end
+	if not pauseRecoveryStartedAt then
+		pauseRecoveryStartedAt = spGetTimer()
+		return
+	end
+	if spDiffTimers(spGetTimer(), pauseRecoveryStartedAt) < pauseRecoveryDelay then
+		return
+	end
+
+	clearPauseRecovery()
+	spEcho("<ZKScraper> Pause detected; resuming replay.")
+	unpauseReplay()
+	forceReplaySpeed()
+end
+
 local function disableReplayControls()
 	if replayControlsDisabled then
 		return
@@ -359,7 +397,7 @@ local function disableReplayControls()
 	spSendCommands("setmaxspeed " .. replaySpeed)
 end
 
-local function forceReplaySpeed()
+forceReplaySpeed = function()
 	spSendCommands("setminspeed " .. replaySpeed)
 	spSendCommands("setmaxspeed " .. replaySpeed)
 end
@@ -453,17 +491,17 @@ end
 
 function widget:Update()
 	disableReplayControls()
+	updatePauseRecovery()
 end
 
 function widget:GamePaused(playerID, paused)
 	if not paused then
+		clearPauseRecovery()
 		return
 	end
 
 	disableReplayControls()
-	spEcho("<ZKScraper> Pause detected; resuming replay.")
-	unpauseReplay()
-	forceReplaySpeed()
+	requestPauseRecovery()
 end
 
 function widget:GameFrame(frame)
@@ -487,6 +525,7 @@ function widget:AddConsoleMessage(msg)
 	inConsoleMsgHook = true
 	unpauseReplay()
 	forceReplaySpeed()
+	clearPauseRecovery()
 	inConsoleMsgHook = false
 end
 
