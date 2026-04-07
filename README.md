@@ -245,13 +245,12 @@ Map asset behavior:
 - `--zk-path` points at a Zero-K portable install and serves archives from `<zk_path>\maps`
 - `GET /maps` lists all map names found in `<zk_path>\maps`
 - heightmaps are served as `512x512` greyscale BMP images
-- map features return JSON with `metal_spots` and placed `features`
+- map features return CBOR with `metal_spots` and placed `features`
 - `.sdz` and `.sd7` map archives are supported
 - `.sd7` extraction uses `ZKSCRAPER_7Z_PATH` when set; otherwise it defaults by OS:
   - Windows: `C:\Program Files\7-Zip\7z.exe`
   - Linux: `7z`
   - macOS: `7zz`
-- replay JSON caching is disabled by default; set `ZKSCRAPER_REPLAY_JSON_CACHE_SIZE` to a small positive integer to enable an LRU cache by replay count
 
 Replay lookup behavior:
 

@@ -49,17 +49,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Show { replay_id, lossy } => {
             let db = ReplayDb::open(args.db)?;
-            if lossy {
-                let parsed = db
-                    .get_replay_value_lossy(&replay_id)?
-                    .ok_or_else(|| format!("replay_id {} not found", replay_id))?;
-                print_replay_value_summary(&parsed);
+            let parsed = if lossy {
+                db.get_replay_lossy(&replay_id)?
             } else {
-                let parsed = db
-                    .get_replay(&replay_id)?
-                    .ok_or_else(|| format!("replay_id {} not found", replay_id))?;
-                print_parsed_replay_summary(&parsed);
+                db.get_replay(&replay_id)?
             }
+            .ok_or_else(|| format!("replay_id {} not found", replay_id))?;
+            print_parsed_replay_summary(&parsed);
         }
         Command::RefreshMetadata => {
             let db = ReplayDb::open(args.db)?;
@@ -107,84 +103,6 @@ fn print_parsed_replay_summary(parsed: &zkscraper::parse::ParsedReplay) {
     println!("players: {}", summary.players_count);
     println!("teams: {}", summary.teams_count);
     println!("map_size: {:?}", parsed.map_size);
-    println!("global_snapshots: {}", summary.global_snapshots);
-    println!(
-        "allyteam_snapshot_streams: {}",
-        summary.allyteam_snapshot_streams
-    );
-    println!(
-        "allyteam_snapshot_frames: {}",
-        summary.allyteam_snapshot_frames
-    );
-    println!("commands: {}", summary.commands);
-    println!("events: {}", summary.events);
-    println!(
-        "first_snapshot_frame: {}",
-        summary
-            .first_snapshot_frame
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "<none>".to_string())
-    );
-    println!(
-        "last_snapshot_frame: {}",
-        summary
-            .last_snapshot_frame
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "<none>".to_string())
-    );
-    println!("first_snapshot_units: {}", first_snapshot_units);
-    println!("last_event_type: {}", last_event);
-    println!("event_preview: {}", event_preview);
-    println!("player_names: {}", player_names);
-}
-
-fn print_replay_value_summary(parsed: &serde_json::Value) {
-    let summary = ReplaySummary::from_value(parsed);
-    let first_snapshot_units = parsed["global_snapshots"]
-        .as_array()
-        .and_then(|snapshots| snapshots.first())
-        .and_then(|snapshot| snapshot["units"].as_array())
-        .map(|units| units.len())
-        .unwrap_or(0);
-    let last_event = parsed["events"]
-        .as_array()
-        .and_then(|events| events.last())
-        .and_then(|event| event["event_type"].as_str())
-        .unwrap_or("<none>");
-    let event_preview = parsed["events"]
-        .as_array()
-        .into_iter()
-        .flat_map(|events| events.iter().take(6))
-        .filter_map(|event| event["event_type"].as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let player_names = parsed["players"]
-        .as_array()
-        .into_iter()
-        .flat_map(|players| players.iter())
-        .filter_map(|player| player["name"].as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    println!("replay_id: {}", summary.replay_id);
-    println!("battle_id: {:?}", summary.battle_id);
-    println!(
-        "replay_filename: {}",
-        parsed["replay_filename"].as_str().unwrap_or_default()
-    );
-    println!(
-        "game_version: {}",
-        parsed["game_version"].as_str().unwrap_or_default()
-    );
-    println!(
-        "engine_version: {}",
-        parsed["engine_version"].as_str().unwrap_or_default()
-    );
-    println!("map_name: {:?}", parsed["map_name"].as_str());
-    println!("game_name: {:?}", parsed["game_name"].as_str());
-    println!("players: {}", summary.players_count);
-    println!("teams: {}", summary.teams_count);
-    println!("map_size: {}", parsed["map_size"]);
     println!("global_snapshots: {}", summary.global_snapshots);
     println!(
         "allyteam_snapshot_streams: {}",

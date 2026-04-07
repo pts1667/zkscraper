@@ -1,14 +1,12 @@
 use std::{
     collections::{BTreeSet, HashMap},
     fmt, fs,
-    num::NonZeroUsize,
     path::Path,
     sync::{Arc, Mutex, RwLock},
 };
 
 use fastapi::ToSchema;
 use indicatif::ProgressBar;
-use lru::LruCache;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -42,10 +40,8 @@ pub struct ReplayDb {
     replay_id_tree: sled::Tree,
     replay_ids: Arc<RwLock<Vec<String>>>,
     summaries: Arc<Mutex<HashMap<String, ReplaySummary>>>,
-    replay_json_cache: Option<Arc<Mutex<LruCache<String, Arc<serde_json::Value>>>>>,
 }
 
-const DEFAULT_REPLAY_JSON_CACHE_SIZE: usize = 0;
 const REPLAY_SUMMARY_TREE: &str = "replay_summaries";
 const REPLAY_ID_TREE: &str = "replay_ids";
 
@@ -108,7 +104,6 @@ impl ReplayDb {
             replay_id_tree,
             replay_ids: Arc::new(RwLock::new(replay_ids)),
             summaries: Arc::new(Mutex::new(HashMap::new())),
-            replay_json_cache: replay_json_cache(),
         })
     }
 
@@ -165,12 +160,6 @@ impl ReplayDb {
             .lock()
             .map_err(|_| ReplayDbError::new("summary cache mutex poisoned"))?
             .insert(replay.replay_id.clone(), ReplaySummary::from(replay));
-        if let Some(cache) = self.replay_json_cache.as_ref() {
-            cache
-                .lock()
-                .map_err(|_| ReplayDbError::new("replay cache mutex poisoned"))?
-                .pop(&replay.replay_id);
-        }
         Ok(())
     }
 
@@ -190,61 +179,28 @@ impl ReplayDb {
         Ok(Some(assemble_replay(metadata, frames)))
     }
 
-    pub fn get_replay_value(
-        &self,
-        replay_id: &str,
-    ) -> Result<Option<serde_json::Value>, ReplayDbError> {
-        if let Some(cache) = self.replay_json_cache.as_ref() {
-            if let Some(cached) = cache
-                .lock()
-                .map_err(|_| ReplayDbError::new("replay cache mutex poisoned"))?
-                .get(replay_id)
-                .cloned()
-            {
-                return Ok(Some((*cached).clone()));
-            }
-        }
-
-        let Some(replay) = self.get_replay(replay_id)? else {
+    pub fn get_replay_lossy(&self, replay_id: &str) -> Result<Option<ParsedReplay>, ReplayDbError> {
+        let Some(mut replay) = self.get_replay(replay_id)? else {
             return Ok(None);
         };
-        let parsed =
-            serde_json::to_value(&replay).map_err(|err| ReplayDbError::new(err.to_string()))?;
-        if let Some(cache) = self.replay_json_cache.as_ref() {
-            cache
-                .lock()
-                .map_err(|_| ReplayDbError::new("replay cache mutex poisoned"))?
-                .put(replay_id.to_string(), Arc::new(parsed.clone()));
-        }
-        Ok(Some(parsed))
+        replay.normalize_lossy_floats();
+        Ok(Some(replay))
     }
 
-    pub fn get_replay_value_lossy(
-        &self,
-        replay_id: &str,
-    ) -> Result<Option<serde_json::Value>, ReplayDbError> {
-        let Some(mut value) = self.get_replay_value(replay_id)? else {
-            return Ok(None);
-        };
-        sanitize_replay_value(&mut value);
-        Ok(Some(value))
-    }
-
-    pub fn get_replay_frame_value_lossy(
+    pub fn get_replay_frame_lossy(
         &self,
         replay_id: &str,
         frame: u32,
-    ) -> Result<Option<serde_json::Value>, ReplayDbError> {
+    ) -> Result<Option<ParsedReplay>, ReplayDbError> {
         let Some(metadata) = self.get_metadata_record(replay_id)? else {
             return Ok(None);
         };
         let Some(frame_record) = self.get_frame_record(replay_id, frame)? else {
             return Ok(None);
         };
-        let mut value = serde_json::to_value(build_partial_replay(metadata, frame_record))
-            .map_err(|err| ReplayDbError::new(err.to_string()))?;
-        sanitize_replay_value(&mut value);
-        Ok(Some(value))
+        let mut replay = build_partial_replay(metadata, frame_record);
+        replay.normalize_lossy_floats();
+        Ok(Some(replay))
     }
 
     pub fn get_replay_frames(&self, replay_id: &str) -> Result<Option<Vec<u32>>, ReplayDbError> {
@@ -628,60 +584,6 @@ impl ReplaySummary {
         }
     }
 
-    pub fn from_value(value: &serde_json::Value) -> Self {
-        let global_snapshots = value["global_snapshots"].as_array();
-        let allyteam_snapshots = value["allyteam_snapshots"].as_object();
-        let battle_id = value["battle_id"]
-            .as_u64()
-            .or_else(|| value["battle_id"].as_str().and_then(|raw| raw.parse().ok()));
-
-        Self {
-            replay_id: value["replay_id"]
-                .as_str()
-                .map(str::to_string)
-                .or_else(|| battle_id.map(|battle_id| battle_id.to_string()))
-                .unwrap_or_default(),
-            battle_id,
-            replay_filename: value["replay_filename"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
-            game_version: value["game_version"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
-            engine_version: value["engine_version"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
-            map_name: value["map_name"].as_str().map(str::to_string),
-            game_name: value["game_name"].as_str().map(str::to_string),
-            players_count: value["players"].as_array().map_or(0, |items| items.len()),
-            teams_count: value["teams"].as_array().map_or(0, |items| items.len()),
-            global_snapshots: global_snapshots.map_or(0, |items| items.len()),
-            allyteam_snapshot_streams: allyteam_snapshots.map_or(0, |items| items.len()),
-            allyteam_snapshot_frames: allyteam_snapshots
-                .map(|items| {
-                    items
-                        .values()
-                        .map(|snapshots| snapshots.as_array().map_or(0, |frames| frames.len()))
-                        .sum()
-                })
-                .unwrap_or(0),
-            commands: value["command_history"]
-                .as_array()
-                .map_or(0, |items| items.len()),
-            events: value["events"].as_array().map_or(0, |items| items.len()),
-            first_snapshot_frame: global_snapshots
-                .and_then(|items| items.first())
-                .and_then(|snapshot| snapshot["frame"].as_u64())
-                .map(|frame| frame as u32),
-            last_snapshot_frame: global_snapshots
-                .and_then(|items| items.last())
-                .and_then(|snapshot| snapshot["frame"].as_u64())
-                .map(|frame| frame as u32),
-        }
-    }
 }
 
 impl From<&ParsedReplay> for ReplaySummary {
@@ -720,11 +622,9 @@ impl From<&ParsedReplay> for ReplaySummary {
 fn decode_legacy_replay(value: &[u8]) -> Result<ParsedReplay, ReplayDbError> {
     let decompressed =
         zstd::decode_all(value).map_err(|err| ReplayDbError::new(err.to_string()))?;
-    let mut parsed = serde_json::from_slice::<serde_json::Value>(&decompressed)
-        .map_err(|err| ReplayDbError::new(err.to_string()))?;
-    sanitize_replay_value(&mut parsed);
     let mut replay: ParsedReplay =
-        serde_json::from_value(parsed).map_err(|err| ReplayDbError::new(err.to_string()))?;
+        serde_json::from_slice(&decompressed).map_err(|err| ReplayDbError::new(err.to_string()))?;
+    replay.normalize_lossy_floats();
     if replay.replay_id.is_empty() {
         replay.replay_id = replay
             .battle_id
@@ -732,14 +632,6 @@ fn decode_legacy_replay(value: &[u8]) -> Result<ParsedReplay, ReplayDbError> {
             .unwrap_or_default();
     }
     Ok(replay)
-}
-
-fn replay_json_cache() -> Option<Arc<Mutex<LruCache<String, Arc<serde_json::Value>>>>> {
-    let size = std::env::var("ZKSCRAPER_REPLAY_JSON_CACHE_SIZE")
-        .ok()
-        .and_then(|raw| raw.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_REPLAY_JSON_CACHE_SIZE);
-    NonZeroUsize::new(size).map(|size| Arc::new(Mutex::new(LruCache::new(size))))
 }
 
 fn metadata_key(replay_id: &str) -> String {
@@ -803,227 +695,13 @@ fn compare_replay_ids(left: &str, right: &str) -> std::cmp::Ordering {
     }
 }
 
-fn sanitize_replay_value(value: &mut serde_json::Value) {
-    let Some(object) = value.as_object_mut() else {
-        return;
-    };
-
-    sanitize_snapshot_array(object.get_mut("global_snapshots"));
-    if let Some(allyteam_snapshots) = object
-        .get_mut("allyteam_snapshots")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        for snapshots in allyteam_snapshots.values_mut() {
-            sanitize_allyteam_snapshot_array(Some(snapshots));
-        }
-    }
-    if let Some(economy_snapshots) = object
-        .get_mut("economy_snapshots")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        for snapshots in economy_snapshots.values_mut() {
-            sanitize_economy_snapshot_array(Some(snapshots));
-        }
-    }
-    sanitize_command_array(object.get_mut("command_history"));
-    sanitize_event_array(object.get_mut("events"));
-}
-
-fn sanitize_snapshot_array(value: Option<&mut serde_json::Value>) {
-    let Some(items) = value.and_then(serde_json::Value::as_array_mut) else {
-        return;
-    };
-    for item in items {
-        sanitize_snapshot_value(item);
-    }
-}
-
-fn sanitize_snapshot_value(value: &mut serde_json::Value) {
-    let Some(object) = value.as_object_mut() else {
-        return;
-    };
-    sanitize_required_float(object.get_mut("game_seconds"));
-    if let Some(units) = object
-        .get_mut("units")
-        .and_then(serde_json::Value::as_array_mut)
-    {
-        for unit in units {
-            sanitize_unit_value(unit);
-        }
-    }
-}
-
-fn sanitize_allyteam_snapshot_array(value: Option<&mut serde_json::Value>) {
-    let Some(items) = value.and_then(serde_json::Value::as_array_mut) else {
-        return;
-    };
-    for item in items {
-        let Some(object) = item.as_object_mut() else {
-            continue;
-        };
-        sanitize_required_float(object.get_mut("game_seconds"));
-        if let Some(units) = object
-            .get_mut("los_units")
-            .and_then(serde_json::Value::as_array_mut)
-        {
-            for unit in units {
-                sanitize_unit_value(unit);
-            }
-        }
-        if let Some(contacts) = object
-            .get_mut("radar_contacts")
-            .and_then(serde_json::Value::as_array_mut)
-        {
-            for contact in contacts {
-                sanitize_radar_contact_value(contact);
-            }
-        }
-    }
-}
-
-fn sanitize_economy_snapshot_array(value: Option<&mut serde_json::Value>) {
-    let Some(items) = value.and_then(serde_json::Value::as_array_mut) else {
-        return;
-    };
-    for item in items {
-        let Some(object) = item.as_object_mut() else {
-            continue;
-        };
-        sanitize_required_float(object.get_mut("game_seconds"));
-        if let Some(economy) = object
-            .get_mut("economy")
-            .and_then(serde_json::Value::as_object_mut)
-        {
-            for value in economy.values_mut() {
-                sanitize_required_float(Some(value));
-            }
-        }
-    }
-}
-
-fn sanitize_event_array(value: Option<&mut serde_json::Value>) {
-    let Some(items) = value.and_then(serde_json::Value::as_array_mut) else {
-        return;
-    };
-    for item in items {
-        let Some(object) = item.as_object_mut() else {
-            continue;
-        };
-        sanitize_required_float(object.get_mut("game_seconds"));
-    }
-}
-
-fn sanitize_command_array(value: Option<&mut serde_json::Value>) {
-    let Some(items) = value.and_then(serde_json::Value::as_array_mut) else {
-        return;
-    };
-    for item in items {
-        sanitize_command_value(item);
-    }
-}
-
-fn sanitize_command_value(value: &mut serde_json::Value) {
-    let Some(object) = value.as_object_mut() else {
-        return;
-    };
-    sanitize_required_float(object.get_mut("game_seconds"));
-    sanitize_float_array(object.get_mut("params"));
-    if let Some(selected) = object
-        .get_mut("decoded")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        sanitize_decoded_command_value(selected);
-    }
-}
-
-fn sanitize_decoded_command_value(value: &mut serde_json::Map<String, serde_json::Value>) {
-    if let Some(target) = value
-        .get_mut("target")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        match target.get("type").and_then(serde_json::Value::as_str) {
-            Some("Position") | Some("position") => {
-                sanitize_required_float(target.get_mut("x"));
-                sanitize_required_float(target.get_mut("y"));
-                sanitize_required_float(target.get_mut("z"));
-            }
-            Some("Area") | Some("area") => {
-                sanitize_required_float(target.get_mut("x"));
-                sanitize_required_float(target.get_mut("y"));
-                sanitize_required_float(target.get_mut("z"));
-                sanitize_required_float(target.get_mut("radius"));
-            }
-            _ => {}
-        }
-    }
-
-    if let Some(inserted) = value
-        .get_mut("inserted")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        sanitize_float_array(inserted.get_mut("params"));
-        if let Some(decoded) = inserted
-            .get_mut("decoded")
-            .and_then(serde_json::Value::as_object_mut)
-        {
-            sanitize_decoded_command_value(decoded);
-        }
-    }
-
-    if let Some(removed) = value
-        .get_mut("removed")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        sanitize_float_array(removed.get_mut("params"));
-    }
-}
-
-fn sanitize_unit_value(value: &mut serde_json::Value) {
-    let Some(object) = value.as_object_mut() else {
-        return;
-    };
-    sanitize_required_float(object.get_mut("x"));
-    sanitize_required_float(object.get_mut("y"));
-    sanitize_required_float(object.get_mut("z"));
-    sanitize_required_float(object.get_mut("hp"));
-    sanitize_required_float(object.get_mut("max_hp"));
-    sanitize_required_float(object.get_mut("build_progress"));
-    sanitize_required_float(object.get_mut("experience"));
-}
-
-fn sanitize_radar_contact_value(value: &mut serde_json::Value) {
-    let Some(object) = value.as_object_mut() else {
-        return;
-    };
-    sanitize_required_float(object.get_mut("x"));
-    sanitize_required_float(object.get_mut("y"));
-    sanitize_required_float(object.get_mut("z"));
-}
-
-fn sanitize_float_array(value: Option<&mut serde_json::Value>) {
-    let Some(items) = value.and_then(serde_json::Value::as_array_mut) else {
-        return;
-    };
-    for item in items {
-        sanitize_required_float(Some(item));
-    }
-}
-
-fn sanitize_required_float(value: Option<&mut serde_json::Value>) {
-    if let Some(slot) = value {
-        if slot.is_null() {
-            *slot = serde_json::json!(0.0);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{migrate_legacy_db, ReplayDb};
     use crate::parse::{
         AllyTeamSnapshotRecord, CommandOptionFlags, CommandRecord, DecodedCommand, EconomySnapshot,
-        EconomySnapshotRecord, EventRecord, MapSize, ParsedReplay, PlayerMetadata, RadarContact,
-        SnapshotRecord, TeamMetadata, UnitSnapshot,
+        EconomySnapshotRecord, EventPayload, EventRecord, MapSize, ParsedReplay,
+        PlayerMetadata, RadarContact, SnapshotRecord, TeamMetadata, UnitSnapshot,
     };
 
     fn sample_replay(battle_id: u64, first_frame: u32) -> ParsedReplay {
@@ -1148,7 +826,9 @@ mod tests {
                 event_type: "test".to_string(),
                 frame: first_frame,
                 game_seconds: 5.0,
-                payload: serde_json::json!({"ok": true}),
+                payload: EventPayload::Object(
+                    std::iter::once(("ok".to_string(), EventPayload::Bool(true))).collect(),
+                ),
             }],
             springie_stats: vec!["SPRINGIE:stats,test".to_string()],
         }
@@ -1228,11 +908,11 @@ mod tests {
         replay_db.put_replay(&sample_replay(42, 120))?;
 
         let replay = replay_db
-            .get_replay_frame_value_lossy("42", 120)?
+            .get_replay_frame_lossy("42", 120)?
             .expect("frame should exist");
-        assert_eq!(replay["global_snapshots"][0]["frame"], 120);
-        assert_eq!(replay["allyteam_snapshots"]["0"][0]["frame"], 120);
-        assert_eq!(replay["economy_snapshots"]["0"][0]["frame"], 120);
+        assert_eq!(replay.global_snapshots[0].frame, 120);
+        assert_eq!(replay.allyteam_snapshots.get(&0).unwrap()[0].frame, 120);
+        assert_eq!(replay.economy_snapshots.get(&0).unwrap()[0].frame, 120);
         Ok(())
     }
 
@@ -1266,11 +946,11 @@ mod tests {
         replay_db.put_replay(&sample_replay(88, 120))?;
 
         let replay = replay_db
-            .get_replay_value_lossy("88")?
+            .get_replay_lossy("88")?
             .expect("replay should exist");
-        assert_eq!(replay["global_snapshots"][0]["game_seconds"], 5.0);
-        assert_eq!(replay["global_snapshots"][0]["units"][0]["x"], 1.0);
-        assert_eq!(replay["command_history"][0]["params"][0], 10.0);
+        assert_eq!(replay.global_snapshots[0].game_seconds, 5.0);
+        assert_eq!(replay.global_snapshots[0].units[0].x, 1.0);
+        assert_eq!(replay.command_history[0].params[0], 10.0);
         Ok(())
     }
 }

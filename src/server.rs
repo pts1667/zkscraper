@@ -373,14 +373,12 @@ async fn get_replay(
     State(state): State<AppState>,
     Path(replay_id): Path<String>,
     Query(query): Query<ReplayQuery>,
-) -> Result<Cbor<serde_json::Value>, ApiError> {
+) -> Result<Cbor<ParsedReplay>, ApiError> {
     let db = state.db.clone();
     let replay_id_for_task = replay_id.clone();
     let replay = tokio::task::spawn_blocking(move || match query.snapshot_frame {
-        Some(snapshot_frame) => {
-            db.get_replay_frame_value_lossy(&replay_id_for_task, snapshot_frame)
-        }
-        None => db.get_replay_value_lossy(&replay_id_for_task),
+        Some(snapshot_frame) => db.get_replay_frame_lossy(&replay_id_for_task, snapshot_frame),
+        None => db.get_replay_lossy(&replay_id_for_task),
     })
     .await
     .map_err(|err| ApiError::internal(format!("replay read task failed: {err}")))?
@@ -1000,8 +998,9 @@ mod tests {
         map_assets::MapService,
         parse::{
             AllyTeamSnapshotRecord, CommandOptionFlags, CommandRecord, DecodedCommand,
-            EconomySnapshot, EconomySnapshotRecord, EventRecord, MapSize, ParsedReplay,
-            PlayerMetadata, RadarContact, SnapshotRecord, TeamMetadata, UnitSnapshot,
+            EconomySnapshot, EconomySnapshotRecord, EventPayload, EventRecord, MapSize,
+            ParsedReplay, PlayerMetadata, RadarContact, SnapshotRecord, TeamMetadata,
+            UnitSnapshot,
         },
     };
 
@@ -1201,7 +1200,9 @@ mod tests {
                 event_type: "test".to_string(),
                 frame: 120,
                 game_seconds: 5.0,
-                payload: serde_json::json!({"ok": true}),
+                payload: EventPayload::Object(
+                    std::iter::once(("ok".to_string(), EventPayload::Bool(true))).collect(),
+                ),
             }],
             springie_stats: vec![],
         }
@@ -1314,8 +1315,8 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await?;
-        let parsed: serde_json::Value = decode_cbor_body(&body)?;
-        assert_eq!(parsed["items"][0]["battle_id"], 2);
+        let parsed: crate::db::ReplayListResponse = decode_cbor_body(&body)?;
+        assert_eq!(parsed.items[0].battle_id, Some(2));
         Ok(())
     }
 
@@ -1344,9 +1345,9 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await?;
-        let parsed: serde_json::Value = decode_cbor_body(&body)?;
-        assert_eq!(parsed["replay_id"], "2");
-        assert_eq!(parsed["frames"], serde_json::json!([120, 240]));
+        let parsed: super::ReplayFramesResponse = decode_cbor_body(&body)?;
+        assert_eq!(parsed.replay_id, "2");
+        assert_eq!(parsed.frames, vec![120, 240]);
         Ok(())
     }
 
@@ -1368,19 +1369,13 @@ mod tests {
             "application/cbor"
         );
         let body = to_bytes(response.into_body(), usize::MAX).await?;
-        let parsed: serde_json::Value = decode_cbor_body(&body)?;
-        assert_eq!(parsed["global_snapshots"].as_array().unwrap().len(), 1);
-        assert_eq!(parsed["global_snapshots"][0]["frame"], 240);
-        assert_eq!(
-            parsed["allyteam_snapshots"]["0"].as_array().unwrap().len(),
-            1
-        );
-        assert_eq!(parsed["allyteam_snapshots"]["0"][0]["frame"], 240);
-        assert_eq!(
-            parsed["economy_snapshots"]["0"].as_array().unwrap().len(),
-            1
-        );
-        assert_eq!(parsed["economy_snapshots"]["0"][0]["frame"], 240);
+        let parsed: ParsedReplay = decode_cbor_body(&body)?;
+        assert_eq!(parsed.global_snapshots.len(), 1);
+        assert_eq!(parsed.global_snapshots[0].frame, 240);
+        assert_eq!(parsed.allyteam_snapshots.get(&0).unwrap().len(), 1);
+        assert_eq!(parsed.allyteam_snapshots.get(&0).unwrap()[0].frame, 240);
+        assert_eq!(parsed.economy_snapshots.get(&0).unwrap().len(), 1);
+        assert_eq!(parsed.economy_snapshots.get(&0).unwrap()[0].frame, 240);
         Ok(())
     }
 
@@ -1468,9 +1463,9 @@ mod tests {
             .await?;
         assert_eq!(features_response.status(), StatusCode::OK);
         let body = to_bytes(features_response.into_body(), usize::MAX).await?;
-        let parsed: serde_json::Value = decode_cbor_body(&body)?;
-        assert_eq!(parsed["metal_spots"][0]["x"], 100.0);
-        assert_eq!(parsed["features"][0]["name"], "treetype1");
+        let parsed: crate::map_assets::MapFeaturesResponse = decode_cbor_body(&body)?;
+        assert_eq!(parsed.metal_spots[0].x, 100.0);
+        assert_eq!(parsed.features[0].name, "treetype1");
         Ok(())
     }
 
@@ -1484,11 +1479,8 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await?;
-        let parsed: serde_json::Value = decode_cbor_body(&body)?;
-        let items = parsed["items"]
-            .as_array()
-            .expect("items should be an array");
-        assert!(items.iter().any(|item| item == "TestMap"));
+        let parsed: crate::map_assets::MapListResponse = decode_cbor_body(&body)?;
+        assert!(parsed.items.iter().any(|item| item == "TestMap"));
         Ok(())
     }
 
