@@ -159,7 +159,7 @@ Behavior:
 - extracts replay metadata from the raw `.sdfz`
 - injects a temporary capture widget into the Zero-K install
 - runs `spring-headless`
-- records global snapshots, per-allyteam FoW snapshots, events, and command history
+- records global snapshots, per-allyteam FoW snapshots, per-team economy/combat snapshots, events, and command history
 - writes successful parses into the DB immediately
 - skips battle IDs already present in the DB
 - continues past per-replay failures and returns a summary error at the end if any replays failed
@@ -355,6 +355,8 @@ Each frame row stores:
 - `allyteam_snapshots`
 - `economy_snapshots`
 
+`economy_snapshots` are keyed by team ID and include both economy values and per-team combat totals captured at that frame.
+
 ### Global Snapshots
 
 `global_snapshots` is the full-world unit snapshot stream.
@@ -377,6 +379,39 @@ Each unit snapshot contains:
 - `build_progress`
 - `heading`
 - `experience`
+
+### Per-Team Economy Snapshots
+
+`economy_snapshots` is a map keyed by team ID.
+
+Each economy snapshot entry contains:
+
+- `team_id`
+- `allyteam_id`
+- `frame`
+- `game_seconds`
+- `economy`
+
+Each `economy` payload contains:
+
+- `metal_income`
+- `energy_income`
+- `metal_stored`
+- `energy_stored`
+- `metal_storage`
+- `energy_storage`
+- `metal_pull`
+- `energy_pull`
+- `metal_expense`
+- `energy_expense`
+- `metal_share`
+- `energy_share`
+- `metal_sent`
+- `energy_sent`
+- `metal_received`
+- `energy_received`
+- `value_damaged`
+- `value_lost`
 
 ### Per-Allyteam Snapshots
 

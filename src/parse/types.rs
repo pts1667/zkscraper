@@ -234,6 +234,10 @@ pub struct EconomySnapshot {
     pub metal_received: f32,
     #[serde(deserialize_with = "deserialize_lossy_f32")]
     pub energy_received: f32,
+    #[serde(default, deserialize_with = "deserialize_lossy_f32")]
+    pub value_damaged: f32,
+    #[serde(default, deserialize_with = "deserialize_lossy_f32")]
+    pub value_lost: f32,
 }
 
 impl EconomySnapshot {
@@ -254,6 +258,8 @@ impl EconomySnapshot {
         normalize_lossy_f32(&mut self.energy_sent);
         normalize_lossy_f32(&mut self.metal_received);
         normalize_lossy_f32(&mut self.energy_received);
+        normalize_lossy_f32(&mut self.value_damaged);
+        normalize_lossy_f32(&mut self.value_lost);
     }
 }
 

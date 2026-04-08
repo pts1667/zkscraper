@@ -25,6 +25,7 @@ local spGetPlayerInfo = Spring.GetPlayerInfo
 local spGetPlayerList = Spring.GetPlayerList
 local spGetTeamInfo = Spring.GetTeamInfo
 local spGetTeamList = Spring.GetTeamList
+local spGetTeamRulesParam = Spring.GetTeamRulesParam
 local spGetTeamResources = Spring.GetTeamResources
 local spGetUnitDefID = Spring.GetUnitDefID
 local spGetUnitExperience = Spring.GetUnitExperience
@@ -35,6 +36,8 @@ local spGetUnitPosition = Spring.GetUnitPosition
 local spGetUnitTeam = Spring.GetUnitTeam
 local spIsReplay = Spring.IsReplay
 local spSendCommands = Spring.SendCommands
+local spUtilities = Spring.Utilities or {}
+local spGetHiddenTeamRulesParam = spUtilities.GetHiddenTeamRulesParam
 
 local metaFile
 local globalSnapshotFile
@@ -262,6 +265,15 @@ local function economyJsonForTeam(teamID)
 		spGetTeamResources(teamID, "metal")
 	local energyCurrent, energyStorage, energyPull, energyIncome, energyExpense, energyShare, energySent, energyReceived =
 		spGetTeamResources(teamID, "energy")
+	local valueDamaged = 0
+	if spGetHiddenTeamRulesParam then
+		valueDamaged = spGetHiddenTeamRulesParam(teamID, "stats_history_damage_dealt_current")
+			or spGetTeamRulesParam(teamID, "stats_history_damage_dealt_current")
+			or 0
+	else
+		valueDamaged = spGetTeamRulesParam(teamID, "stats_history_damage_dealt_current") or 0
+	end
+	local valueLost = spGetTeamRulesParam(teamID, "stats_history_unit_value_lost_current") or 0
 
 	return objectToJson({
 		"\"metal_income\":" .. jsonNumber(metalIncome or 0),
@@ -280,6 +292,8 @@ local function economyJsonForTeam(teamID)
 		"\"energy_sent\":" .. jsonNumber(energySent or 0),
 		"\"metal_received\":" .. jsonNumber(metalReceived or 0),
 		"\"energy_received\":" .. jsonNumber(energyReceived or 0),
+		"\"value_damaged\":" .. jsonNumber(valueDamaged),
+		"\"value_lost\":" .. jsonNumber(valueLost),
 	})
 end
 

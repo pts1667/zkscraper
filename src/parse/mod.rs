@@ -359,7 +359,10 @@ fn headless_process_is_running() -> Result<bool, Box<dyn std::error::Error>> {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{acquire_headless_parse_lock, headless::engine_binary_candidates, ParsedReplay};
+    use super::{
+        acquire_headless_parse_lock, headless::engine_binary_candidates, EconomySnapshot,
+        ParsedReplay,
+    };
 
     #[test]
     fn engine_candidates_include_cross_platform_locations() {
@@ -430,6 +433,34 @@ mod tests {
         .unwrap();
 
         assert!(replay.economy_snapshots.is_empty());
+    }
+
+    #[test]
+    fn economy_snapshot_defaults_missing_combat_fields() {
+        let snapshot = serde_json::from_str::<EconomySnapshot>(
+            r#"{
+                "metal_income": 1,
+                "energy_income": 2,
+                "metal_stored": 3,
+                "energy_stored": 4,
+                "metal_storage": 5,
+                "energy_storage": 6,
+                "metal_pull": 7,
+                "energy_pull": 8,
+                "metal_expense": 9,
+                "energy_expense": 10,
+                "metal_share": 11,
+                "energy_share": 12,
+                "metal_sent": 13,
+                "energy_sent": 14,
+                "metal_received": 15,
+                "energy_received": 16
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.value_damaged, 0.0);
+        assert_eq!(snapshot.value_lost, 0.0);
     }
 
     #[test]

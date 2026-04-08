@@ -792,6 +792,8 @@ mod tests {
                         energy_sent: 14.0,
                         metal_received: 15.0,
                         energy_received: 16.0,
+                        value_damaged: 17.0,
+                        value_lost: 18.0,
                     },
                 }],
             ))
@@ -950,6 +952,10 @@ mod tests {
             .expect("replay should exist");
         assert_eq!(replay.global_snapshots[0].game_seconds, 5.0);
         assert_eq!(replay.global_snapshots[0].units[0].x, 1.0);
+        assert_eq!(
+            replay.economy_snapshots.get(&0).unwrap()[0].economy.value_damaged,
+            17.0
+        );
         assert_eq!(replay.command_history[0].params[0], 10.0);
         Ok(())
     }

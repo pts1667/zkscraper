@@ -1141,6 +1141,8 @@ mod tests {
                             energy_sent: 14.0,
                             metal_received: 15.0,
                             energy_received: 16.0,
+                            value_damaged: 17.0,
+                            value_lost: 18.0,
                         },
                     },
                     EconomySnapshotRecord {
@@ -1165,6 +1167,8 @@ mod tests {
                             energy_sent: 15.0,
                             metal_received: 16.0,
                             energy_received: 17.0,
+                            value_damaged: 18.0,
+                            value_lost: 19.0,
                         },
                     },
                 ],
@@ -1376,6 +1380,14 @@ mod tests {
         assert_eq!(parsed.allyteam_snapshots.get(&0).unwrap()[0].frame, 240);
         assert_eq!(parsed.economy_snapshots.get(&0).unwrap().len(), 1);
         assert_eq!(parsed.economy_snapshots.get(&0).unwrap()[0].frame, 240);
+        assert_eq!(
+            parsed.economy_snapshots.get(&0).unwrap()[0].economy.value_damaged,
+            18.0
+        );
+        assert_eq!(
+            parsed.economy_snapshots.get(&0).unwrap()[0].economy.value_lost,
+            19.0
+        );
         Ok(())
     }
 
